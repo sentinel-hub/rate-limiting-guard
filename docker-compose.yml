@@ -1,0 +1,15 @@
+version: '2.1'
+services:
+
+  redis:
+    image: redis:6.0-buster
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    entrypoint: redis-server
+    command: --port 6379
