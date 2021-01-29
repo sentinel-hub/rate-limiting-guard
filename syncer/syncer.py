@@ -14,12 +14,14 @@ POLICY_TYPES_SHORT_NAMES = {
     "PROCESSING_UNITS": "PU",
     "REQUESTS": "RQ",
 }
-REDIS_POLICIES_KEY = b"rl"
+REDIS_BUCKETS_KEY = b"remaining"
+REDIS_TIMINGS_KEY = b"refill_ns"
+REDIS_TYPES_KEY = b"types"
 
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
@@ -81,6 +83,7 @@ def fetch_rate_limits(user_id, auth_token):
                     "initial": remaining,
                     "fill_interval_s": fill_interval_s,
                     "fill_quantity": fill_quantity,
+                    "nanos_between_refills": int(policy["nanosBetweenRefills"]),
                 }
             )
     return rate_limits
@@ -102,9 +105,11 @@ def adjust_filling(nanos_between_refills):
 
 
 def redis_init_rate_limits(rate_limits):
-    with r.pipeline() as pipe:
+    with rds.pipeline() as pipe:
         for policy in rate_limits:
-            pipe.hset(REDIS_POLICIES_KEY, policy["id"], policy["initial"])
+            pipe.hset(REDIS_BUCKETS_KEY, policy["id"], policy["initial"])
+            pipe.hset(REDIS_TIMINGS_KEY, policy["id"], policy["nanos_between_refills"])
+            pipe.hset(REDIS_TYPES_KEY, policy["id"], policy["type"])
         pipe.execute()
 
 
@@ -113,10 +118,10 @@ def redis_fill_bucket(field, incr_by, limit):
     Since we can't atomically check and increment conditionally, we increment, then
     check the new value, and decrement back if over the limit.
     """
-    new_value = r.hincrbyfloat(REDIS_POLICIES_KEY, field, incr_by)
+    new_value = rds.hincrbyfloat(REDIS_BUCKETS_KEY, field, incr_by)
     if int(new_value) > limit:
         decr_by = int(new_value) - limit
-        final_value = r.hincrbyfloat(REDIS_POLICIES_KEY, field, -decr_by)
+        final_value = rds.hincrbyfloat(REDIS_BUCKETS_KEY, field, -decr_by)
         logging.debug(f"Filled {field} to {final_value} (limit {limit} reached)")
     else:
         logging.debug(f"Filled {field} to {new_value} (limit {limit})")
