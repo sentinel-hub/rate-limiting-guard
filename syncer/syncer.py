@@ -5,6 +5,12 @@ import jwt
 import requests
 
 
+POLICY_TYPES_SHORT_NAMES = {
+    "PROCESSING_UNITS": "PU",
+    "REQUESTS": "RQ",
+}
+
+
 def request_auth_token(client_id, client_secret):
     r = requests.post(
         "https://services.sentinel-hub.com/oauth/token",
@@ -37,15 +43,16 @@ def fetch_rate_limits(user_id, auth_token):
     rate_limits = []
     for part in j["data"]:
         for policy in part["policies"]:
+            policy_type = POLICY_TYPES_SHORT_NAMES[part["type"]["name"]]
+            policy_id = f'{policy_type}_{policy["capacity"]}_{policy["samplingPeriod"]}'
             rate_limits.append(
                 {
-                    "type": part["type"]["name"],
+                    "id": policy_id,
+                    "type": policy_type,
                     "capacity": policy["capacity"],
-                    "samplingPeriod": policy["samplingPeriod"],
                     "nanosBetweenRefills": policy["nanosBetweenRefills"],
                 }
             )
-    print(json.dumps(rate_limits))
     return rate_limits
 
 
@@ -58,3 +65,4 @@ if __name__ == "__main__":
     auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
     user_id = extract_user_id(auth_token)
     rate_limits = fetch_rate_limits(user_id, auth_token)
+    print(json.dumps(rate_limits))
