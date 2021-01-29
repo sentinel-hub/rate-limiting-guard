@@ -1,3 +1,4 @@
+import logging
 import json
 import math
 import os
@@ -19,6 +20,9 @@ REDIS_POLICIES_KEY = b"rl"
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 
 def request_auth_token(client_id, client_secret):
@@ -66,6 +70,9 @@ def fetch_rate_limits(user_id, auth_token):
             policy_id = f'{policy_type}_{policy["capacity"]}_{policy["samplingPeriod"]}'
             remaining = stats[policy_type_long][policy["samplingPeriod"]]
             fill_interval_s, fill_quantity = adjust_filling(int(policy["nanosBetweenRefills"]))
+            logging.info(
+                f"Found rate limiting policy: {policy_type_long}, remaining {remaining}, capacity {policy['capacity']}, nanosBetweenRefills {policy['nanosBetweenRefills']}"
+            )
             rate_limits.append(
                 {
                     "id": policy_id,
@@ -101,6 +108,20 @@ def redis_init_rate_limits(rate_limits):
         pipe.execute()
 
 
+def redis_fill_bucket(field, incr_by, limit):
+    """
+    Since we can't atomically check and increment conditionally, we increment, then
+    check the new value, and decrement back if over the limit.
+    """
+    new_value = r.hincrbyfloat(REDIS_POLICIES_KEY, field, incr_by)
+    if int(new_value) > limit:
+        decr_by = int(new_value) - limit
+        final_value = r.hincrbyfloat(REDIS_POLICIES_KEY, field, -decr_by)
+        logging.debug(f"Filled {field} to {final_value} (limit {limit} reached)")
+    else:
+        logging.debug(f"Filled {field} to {new_value} (limit {limit})")
+
+
 def run_syncing(rate_limits):
     """
     Runs a scheduler which fills the rate limiting buckets in Redis.
@@ -114,11 +135,12 @@ def run_syncing(rate_limits):
     s = sched.scheduler(time.time, time.sleep)
     PRIORITY = 1
 
-    def fill_bucket(policy_id, fill_interval_s, fill_quantity, scheduled_at):
+    def fill_bucket(policy_id, fill_interval_s, fill_quantity, capacity, scheduled_at):
         now = time.time()
-        print(
-            f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at}, {now - scheduled_at}s late."
+        logging.debug(
+            f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at:.3f}, {now - scheduled_at:.3f}s late."
         )
+        redis_fill_bucket(policy_id, fill_quantity, capacity)
 
         # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
         adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
@@ -126,6 +148,7 @@ def run_syncing(rate_limits):
             policy_id,
             fill_interval_s,
             fill_quantity,
+            capacity,
             scheduled_at + fill_interval_s,
         )
         s.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
@@ -136,11 +159,14 @@ def run_syncing(rate_limits):
         policy_id = policy["id"]
         fill_interval_s = policy["fill_interval_s"]
         fill_quantity = policy["fill_quantity"]
+        capacity = policy["capacity"]
+        logging.info(f"Rate limiting policy {policy_id}: {fill_quantity} every {fill_interval_s}s, up until {capacity}")
         scheduled_at = now + fill_interval_s
         arguments = (
             policy_id,
             fill_interval_s,
             fill_quantity,
+            capacity,
             scheduled_at,
         )
         s.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
@@ -156,7 +182,6 @@ def main():
     auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
     user_id = extract_user_id(auth_token)
     rate_limits = fetch_rate_limits(user_id, auth_token)
-    print(json.dumps(rate_limits))
 
     redis_init_rate_limits(rate_limits)
     run_syncing(rate_limits)
