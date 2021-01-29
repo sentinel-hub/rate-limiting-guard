@@ -1,5 +1,8 @@
 import json
+import math
 import os
+import sched
+import time
 
 import jwt
 import redis
@@ -62,16 +65,33 @@ def fetch_rate_limits(user_id, auth_token):
             policy_type = POLICY_TYPES_SHORT_NAMES[policy_type_long]
             policy_id = f'{policy_type}_{policy["capacity"]}_{policy["samplingPeriod"]}'
             remaining = stats[policy_type_long][policy["samplingPeriod"]]
+            fill_interval_s, fill_quantity = adjust_filling(int(policy["nanosBetweenRefills"]))
             rate_limits.append(
                 {
                     "id": policy_id,
                     "type": policy_type,
                     "capacity": policy["capacity"],
                     "initial": remaining,
-                    "nanosBetweenRefills": policy["nanosBetweenRefills"],
+                    "fill_interval_s": fill_interval_s,
+                    "fill_quantity": fill_quantity,
                 }
             )
     return rate_limits
+
+
+def adjust_filling(nanos_between_refills):
+    """
+    We know that we don't have a chance to run tasks with ns precision, so we adjust the
+    filling interval to 100ms or more (and increment value accordingly).
+    """
+    MIN_INTERVAL_NS = 100 * 1000 * 1000  # 100 ms sounds manageable
+    if nanos_between_refills >= MIN_INTERVAL_NS:
+        fill_interval_s, fill_quantity = nanos_between_refills / 1000000000.0, 1
+        return fill_interval_s, fill_quantity
+    # we need to fix fill_quantity so that we can return big enough fill time:
+    n_at_once = math.ceil(MIN_INTERVAL_NS / nanos_between_refills)
+    fill_interval_s = (nanos_between_refills * n_at_once) / 1000000000.0
+    return fill_interval_s, n_at_once
 
 
 def redis_init_rate_limits(rate_limits):
@@ -81,7 +101,53 @@ def redis_init_rate_limits(rate_limits):
         pipe.execute()
 
 
-if __name__ == "__main__":
+def run_syncing(rate_limits):
+    """
+    Runs a scheduler which fills the rate limiting buckets in Redis.
+
+    We are using the stock Python `sched` package for running the filling tasks.
+
+    We are well aware that in theory the way we are dealing with time is not the most precise
+    way. However the difference should be negligable and should not matter, because the process
+    fixes itself in time if we have either too big or too small value in a bucket.
+    """
+    s = sched.scheduler(time.time, time.sleep)
+    PRIORITY = 1
+
+    def fill_bucket(policy_id, fill_interval_s, fill_quantity, scheduled_at):
+        now = time.time()
+        print(
+            f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at}, {now - scheduled_at}s late."
+        )
+
+        # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
+        adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
+        arguments = (
+            policy_id,
+            fill_interval_s,
+            fill_quantity,
+            scheduled_at + fill_interval_s,
+        )
+        s.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
+
+    # initialize the scheduler:
+    now = time.time()
+    for policy in rate_limits:
+        policy_id = policy["id"]
+        fill_interval_s = policy["fill_interval_s"]
+        fill_quantity = policy["fill_quantity"]
+        scheduled_at = now + fill_interval_s
+        arguments = (
+            policy_id,
+            fill_interval_s,
+            fill_quantity,
+            scheduled_at,
+        )
+        s.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
+    s.run()
+
+
+def main():
     CLIENT_ID = os.environ.get("CLIENT_ID")
     CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
     if not CLIENT_ID or not CLIENT_SECRET:
@@ -93,3 +159,8 @@ if __name__ == "__main__":
     print(json.dumps(rate_limits))
 
     redis_init_rate_limits(rate_limits)
+    run_syncing(rate_limits)
+
+
+if __name__ == "__main__":
+    main()
