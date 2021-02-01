@@ -13,3 +13,17 @@ services:
       retries: 30
     entrypoint: redis-server
     command: --port 6379 --save "" --appendonly no
+
+  syncer:
+    image: sentinelhub/rate-limiting-guard
+    build:
+      context: ./syncer/
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      CLIENT_ID: "${CLIENT_ID}"
+      CLIENT_SECRET: "${CLIENT_SECRET}"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379

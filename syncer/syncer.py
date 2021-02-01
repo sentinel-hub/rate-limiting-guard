@@ -181,6 +181,11 @@ def run_syncing(rate_limits):
 def main():
     CLIENT_ID = os.environ.get("CLIENT_ID")
     CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+    # Docker-compose doesn't strip double quotes when reading from .env; however running this file from
+    # command line decodes the secret incorrectly if the quotes are absent. To avoid having two different
+    # ways of writing .env files, we remove the quotes here if present:
+    if CLIENT_SECRET.startswith('"') and CLIENT_SECRET.endswith('"'):
+        CLIENT_SECRET = CLIENT_SECRET[1:-1]
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
