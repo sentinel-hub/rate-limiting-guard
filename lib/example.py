@@ -1,10 +1,15 @@
+import logging
 import os
-
+import random
+import time
 
 import requests
+import requests.exceptions
+
+from rlguard import calculate_processing_units, OutputFormat, apply_for_request
 
 
-from rlguard import calculate_processing_units, OutputFormat
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 
 def request_auth_token(client_id, client_secret):
@@ -22,7 +27,18 @@ def request_auth_token(client_id, client_secret):
 
 
 def get_map(auth_token, output_filename=None):
-    # example taken from: https://docs.sentinel-hub.com/api/latest/data/sentinel-2-l1c/examples/#true-color
+    """
+    This example shows how to download satellite imagery from Sentinel Hub using the Rate Limiting Guard
+    for protection against rate limiting responses (429).
+    """
+    # calculate PU based on request parameters:
+    pu = calculate_processing_units(False, 1024, 1024, 3, OutputFormat.OTHER, 1, False)
+    delay = apply_for_request(pu)
+    if delay > 0.0:
+        logging.info(f"Rate limited, sleeping for {delay}s...")
+        time.sleep(delay)
+
+    logging.info("Performing request...")
     r = requests.post(
         "https://services.sentinel-hub.com/api/v1/process",
         headers={
@@ -42,8 +58,8 @@ def get_map(auth_token, output_filename=None):
                 ],
             },
             "output": {
-                "width": 512,
-                "height": 512,
+                "width": 1024,
+                "height": 1024,
             },
             "evalscript": """
                 //VERSION=3
@@ -66,6 +82,7 @@ def get_map(auth_token, output_filename=None):
     if output_filename:
         with open(output_filename, "wb") as fh:
             fh.write(r.content)
+    logging.info("...request completed.")
 
 
 def main():
@@ -73,12 +90,25 @@ def main():
     CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
-
     auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
 
-    pu = calculate_processing_units(False, 1024, 1024, 4, OutputFormat.IMAGE_TIFF_DEPTH_32, 2, True)
-    print(pu)
-    get_map(auth_token, "output.jpg")
+    N_TRIES = 5
+    for n_try in range(N_TRIES):
+        try:
+            get_map(auth_token, "output.jpg")
+            break
+        except requests.exceptions.HTTPError:
+            # there was an error - exponential backoff with some jitter (to avoid all workers hitting the same time again)
+            jitter = 0.75 + (0.5 * random.random())  # 25% jitter - 0.75 - 1.25
+            retry_timeout = (2 ** n_try) * jitter
+            if n_try < N_TRIES - 1:
+                logging.warning(
+                    f"There was an error fetching data (iteration {n_try}), retrying in {retry_timeout} seconds..."
+                )
+                time.sleep(retry_timeout)
+            else:
+                logging.error(f"Request failed {N_TRIES} times, failing... sorry.")
+                raise
 
 
 if __name__ == "__main__":

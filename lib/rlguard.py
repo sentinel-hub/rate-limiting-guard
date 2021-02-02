@@ -1,4 +1,31 @@
 from enum import Enum
+import logging
+import os
+from typing import Optional
+
+import redis
+
+
+REDIS_REMAINING_KEY = b"remaining"
+REDIS_REFILLS_KEY = b"refill_ns"
+REDIS_TYPES_KEY = b"types"
+
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+
+class PolicyType(Enum):
+    PROCESSING_UNITS = "PU"
+    REQUESTS = "RQ"
+
+    def __eq__(self, value):
+        if isinstance(value, bytes):
+            return self.value == value.decode()
+        if isinstance(value, str):
+            return self.value == value
+        return super().__eq__(value)
 
 
 class OutputFormat(Enum):
@@ -52,3 +79,35 @@ def calculate_processing_units(
     # The minimal weight for a request is 0.001 PU.
     pu = max(pu, 0.001)
     return pu
+
+
+def apply_for_request(processing_units: float) -> float:
+    """
+    Decrements & fetches the Redis counters and calculates the delay.
+    """
+    # figure out the types of the buckets so we know how much to decrement them:
+    with rds.pipeline() as pipe:
+        pipe.hgetall(REDIS_TYPES_KEY)
+        pipe.hgetall(REDIS_REFILLS_KEY)
+        policy_types, policy_refills = pipe.execute()
+
+    logging.debug(f"Policy types: {policy_types}")
+    logging.debug(f"Policy bucket refills: {policy_refills}ns")
+
+    # decrement buckets according to their type:
+    with rds.pipeline() as pipe:
+        buckets_types_items = policy_types.items()
+        for policy_id, policy_type in buckets_types_items:
+            pipe.hincrbyfloat(
+                REDIS_REMAINING_KEY, policy_id, -processing_units if policy_type == PolicyType.PROCESSING_UNITS else -1
+            )
+        new_remaining = pipe.execute()
+        new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
+
+    logging.debug(f"Bucket values after decrementing them: {new_remaining}")
+    wait_times_ns = [-new_remaining[policy_id] * float(policy_refills[policy_id]) for policy_id in new_remaining.keys()]
+    logging.debug(f"Wait times in s for each policy: {[0 if ns < 0 else ns / 1000000000. for ns in wait_times_ns]}")
+    delay_ns = max(wait_times_ns)
+    if delay_ns < 0:
+        return 0
+    return delay_ns / 1000000000.0
