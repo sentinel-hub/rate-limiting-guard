@@ -13,6 +13,12 @@ logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 
 def request_auth_token(client_id, client_secret):
+    """
+    Given the CLIENT_ID and CLIENT_SECRET, request a temporary authentication token which can later be used to
+    request satellite imagery.
+
+    See https://docs.sentinel-hub.com/api/latest/api/overview/authentication/ for details.
+    """
     r = requests.post(
         "https://services.sentinel-hub.com/oauth/token",
         data={
@@ -33,11 +39,16 @@ def get_map(auth_token, output_filename=None):
     """
     # calculate PU based on request parameters:
     pu = calculate_processing_units(False, 1024, 1024, 3, OutputFormat.OTHER, 1, False)
+
+    # now apply for permission to make a request:
     delay = apply_for_request(pu)
+
+    # if `apply_for_request` tells us to wait for some time before issuing the request, we should sleep a bit:
     if delay > 0.0:
         logging.info(f"Rate limited, sleeping for {delay}s...")
         time.sleep(delay)
 
+    # note that sentinelhub-py could also be used here instead of performing the request directly:
     logging.info("Performing request...")
     r = requests.post(
         "https://services.sentinel-hub.com/api/v1/process",
@@ -79,6 +90,7 @@ def get_map(auth_token, output_filename=None):
         },
     )
     r.raise_for_status()
+
     if output_filename:
         with open(output_filename, "wb") as fh:
             fh.write(r.content)
@@ -92,18 +104,20 @@ def main():
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
     auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
 
+    # if the request fails for any reason, we should retry it a few times:
     N_TRIES = 5
-    for n_try in range(N_TRIES):
+    for iteration in range(N_TRIES):
         try:
             get_map(auth_token, "output.jpg")
-            break
+            break  # request succeeded, no need to retry it
         except requests.exceptions.HTTPError:
-            # there was an error - exponential backoff with some jitter (to avoid all workers hitting the same time again)
+            # there was an error - perform exponential backoff
+            # we apply some jitter to avoid all workers hitting the same time again:
             jitter = 0.75 + (0.5 * random.random())  # 25% jitter - 0.75 - 1.25
-            retry_timeout = (2 ** n_try) * jitter
-            if n_try < N_TRIES - 1:
+            retry_timeout = (2 ** iteration) * jitter
+            if iteration < N_TRIES - 1:
                 logging.warning(
-                    f"There was an error fetching data (iteration {n_try}), retrying in {retry_timeout} seconds..."
+                    f"There was an error fetching data (iteration {iteration}), retrying in {retry_timeout} seconds..."
                 )
                 time.sleep(retry_timeout)
             else:
