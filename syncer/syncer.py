@@ -84,7 +84,7 @@ def fetch_rate_limits(user_id, auth_token):
             rate_limits.append(
                 {
                     "id": policy_id,
-                    "type": policy_type,
+                    "type": str(policy_type),
                     "capacity": policy["capacity"],
                     "initial": remaining,
                     "fill_interval_s": fill_interval_s,
