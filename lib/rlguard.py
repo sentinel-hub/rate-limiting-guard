@@ -20,13 +20,6 @@ class PolicyType(Enum):
     PROCESSING_UNITS = "PU"
     REQUESTS = "RQ"
 
-    def __eq__(self, value):
-        if isinstance(value, bytes):
-            return self.value == value.decode()
-        if isinstance(value, str):
-            return self.value == value
-        return super().__eq__(value)
-
 
 class OutputFormat(Enum):
     IMAGE_TIFF_DEPTH_32 = "tiff32"
@@ -99,7 +92,9 @@ def apply_for_request(processing_units: float) -> float:
         buckets_types_items = policy_types.items()
         for policy_id, policy_type in buckets_types_items:
             pipe.hincrbyfloat(
-                REDIS_REMAINING_KEY, policy_id, -processing_units if policy_type == PolicyType.PROCESSING_UNITS else -1
+                REDIS_REMAINING_KEY,
+                policy_id,
+                -processing_units if policy_type.decode() == PolicyType.PROCESSING_UNITS.value else -1,
             )
         new_remaining = pipe.execute()
         new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
