@@ -228,4 +228,5 @@ def main():
 
 if __name__ == "__main__":
     signal.signal(signal.SIGHUP, sighup_signal_handler)
+    time.sleep(2)
     main()
