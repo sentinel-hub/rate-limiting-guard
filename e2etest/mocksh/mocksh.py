@@ -7,6 +7,26 @@ FAKE_USER_ID = "1234567890"
 # payload: { "sub": "1234567890" }
 FAKE_USER_JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 
+POLICIES_PU = [
+    {
+        "capacity": 1000,
+        "samplingPeriod": "PT1M",
+        "nanosBetweenRefills": 60000000,
+    },
+    {
+        "capacity": 400000,
+        "samplingPeriod": "PT744H",
+        "nanosBetweenRefills": 6696000000,
+    },
+]
+POLICIES_RQ = [
+    {
+        "capacity": 1000,
+        "samplingPeriod": "PT1M",
+        "nanosBetweenRefills": 60000000,
+    }
+]
+
 
 @app.post("/oauth/token")
 def post_oauth_token():
@@ -18,33 +38,15 @@ def get_contract():
     return {
         "data": [
             {
-                "policies": [
-                    {
-                        "capacity": 1000,
-                        "samplingPeriod": "PT1M",
-                        "nanosBetweenRefills": 60000000,
-                    },
-                    {
-                        "capacity": 400000,
-                        "samplingPeriod": "PT744H",
-                        "nanosBetweenRefills": 6696000000,
-                    },
-                ],
+                "policies": POLICIES_RQ,
                 "type": {
-                    "name": "PROCESSING_UNITS",
+                    "name": "REQUESTS",
                 },
             },
             {
-                "policies": [
-                    {
-                        "capacity": 1000,
-                        "samplingPeriod": "PT1M",
-                        "nanosBetweenRefills": 60000000,
-                        "niceSamplindPeriod": "1 minute",
-                    }
-                ],
+                "policies": POLICIES_PU,
                 "type": {
-                    "name": "REQUESTS",
+                    "name": "PROCESSING_UNITS",
                 },
             },
         ],
@@ -55,8 +57,10 @@ def get_contract():
 def get_stats():
     return {
         "data": {
-            "REQUESTS": {"PT1M": 1000.0},
-            "PROCESSING_UNITS": {"PT1M": 1000.0, "PT744H": 400000.0},
+            "REQUESTS": {p["samplingPeriod"]: p["capacity"] for p in POLICIES_RQ},
+            "PROCESSING_UNITS": {
+                p["samplingPeriod"]: p["capacity"] for p in POLICIES_PU
+            },
         }
     }
 
