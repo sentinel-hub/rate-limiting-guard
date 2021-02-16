@@ -1,6 +1,15 @@
-from fastapi import FastAPI, Request
+from typing import List
 
-app = FastAPI()
+from fastapi import FastAPI, Request, Response
+from pydantic import BaseModel
+
+app = FastAPI(
+    # workaround so that /docs endpoint works:
+    #   https://github.com/iwpnd/fastapi-aws-lambda-example/issues/2
+    openapi_prefix="/",
+    title="Mock API for e2e tests on SH rate limiting guard project",
+    description="Implements endpoints which allow e2e tests to run without access to Sentinel Hub. Also mimics SH rate limiting.",
+)
 
 
 FAKE_USER_ID = "1234567890"
@@ -9,7 +18,14 @@ FAKE_USER_JWT_TOKEN = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 )
 
-app.state.POLICIES_PU = [
+
+class Policy(BaseModel):
+    capacity: int
+    samplingPeriod: str
+    nanosBetweenRefills: int
+
+
+app.state.POLICIES_PU: List[Policy] = [
     {
         "capacity": 1000,
         "samplingPeriod": "PT1M",
@@ -21,7 +37,7 @@ app.state.POLICIES_PU = [
         "nanosBetweenRefills": 6696000000,
     },
 ]
-app.state.POLICIES_RQ = [
+app.state.POLICIES_RQ: List[Policy] = [
     {
         "capacity": 1000,
         "samplingPeriod": "PT1M",
@@ -59,6 +75,18 @@ def get_stats(request: Request):
             "PROCESSING_UNITS": {p["samplingPeriod"]: p["capacity"] for p in request.app.state.POLICIES_PU},
         },
     }
+
+
+@app.put("/policies/PU")
+def put_policies_pu(policies: List[Policy], request: Request):
+    request.app.state.POLICIES_PU = policies
+    return Response(status_code=202)
+
+
+@app.put("/policies/RQ")
+def put_policies_rq(policies: List[Policy], request: Request):
+    request.app.state.POLICIES_RQ = policies
+    return Response(status_code=202)
 
 
 if __name__ == "__main__":

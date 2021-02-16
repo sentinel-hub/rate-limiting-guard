@@ -216,7 +216,13 @@ def main():
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
     while True:
-        auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+        try:
+            auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+        except Exception as ex:
+            logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
+            time.sleep(5)
+            continue
+
         user_id = extract_user_id(auth_token)
         rate_limits = fetch_rate_limits(user_id, auth_token)
 
@@ -228,5 +234,4 @@ def main():
 
 if __name__ == "__main__":
     signal.signal(signal.SIGHUP, sighup_signal_handler)
-    time.sleep(2)
     main()
