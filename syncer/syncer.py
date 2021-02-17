@@ -129,6 +129,7 @@ def adjust_filling(nanos_between_refills):
 
 def redis_init_rate_limits(rate_limits):
     with rds.pipeline() as pipe:
+        pipe.delete(REDIS_REMAINING_KEY, REDIS_REFILLS_KEY, REDIS_TYPES_KEY)
         for policy in rate_limits:
             pipe.hset(REDIS_REMAINING_KEY, policy["id"], policy["initial"])
             pipe.hset(REDIS_REFILLS_KEY, policy["id"], policy["nanos_between_refills"])
