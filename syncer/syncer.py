@@ -43,9 +43,20 @@ scheduled_tasks = {}
 
 def sighup_signal_handler(signum, frame):
     global scheduler, scheduled_tasks
-    logging.info(f"Received SIGHUP signal, stopping all scheduled tasks:")
-    for task in scheduled_tasks.values():
-        scheduler.cancel(task)
+    logging.info("Received SIGHUP signal, stopping all scheduled tasks:")
+    if not scheduler:
+        logging.info("No tasks were running yet, ignoring signal.")
+        return
+
+    keys = list(scheduled_tasks.keys())
+    for key in keys:
+        try:
+            scheduler.cancel(scheduled_tasks[key])
+            del scheduled_tasks[key]
+        except ValueError:
+            pass
+    if not scheduler.empty():
+        raise Exception("Scheduler is not empty, even though we have stopped all the tasks")
     scheduler = None
     logging.info(f"Tasks stopped.")
 

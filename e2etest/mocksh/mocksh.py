@@ -1,5 +1,6 @@
 import asyncio
-import random
+import logging
+import os
 import time
 from typing import List, Optional
 
@@ -22,6 +23,9 @@ FAKE_USER_JWT_TOKEN = (
 )
 
 
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
+
+
 class Policy(BaseModel):
     capacity: int
     samplingPeriod: str
@@ -29,26 +33,12 @@ class Policy(BaseModel):
 
 
 app.state.POLICIES_PU: List[Policy] = [
-    {
-        "capacity": 1000,
-        "samplingPeriod": "PT1M",
-        "nanosBetweenRefills": 60000000,
-    },
-    {
-        "capacity": 400000,
-        "samplingPeriod": "PT744H",
-        "nanosBetweenRefills": 6696000000,
-    },
+    Policy(capacity=1000, samplingPeriod="PT1M", nanosBetweenRefills=60000000),
+    Policy(capacity=400000, samplingPeriod="PT744H", nanosBetweenRefills=6696000000),
 ]
-app.state.POLICIES_RQ: List[Policy] = [
-    {
-        "capacity": 1000,
-        "samplingPeriod": "PT1M",
-        "nanosBetweenRefills": 60000000,
-    }
-]
-app.state.buckets_pu = [p["capacity"] for p in app.state.POLICIES_PU]
-app.state.buckets_rq = [p["capacity"] for p in app.state.POLICIES_RQ]
+app.state.POLICIES_RQ: List[Policy] = [Policy(capacity=1000, samplingPeriod="PT1M", nanosBetweenRefills=60000000)]
+app.state.buckets_pu = [p.capacity for p in app.state.POLICIES_PU]
+app.state.buckets_rq = [p.capacity for p in app.state.POLICIES_RQ]
 app.state.last_increment_time = time.monotonic()
 
 
@@ -62,11 +52,11 @@ def get_contract(request: Request):
     return {
         "data": [
             {
-                "policies": request.app.state.POLICIES_RQ,
+                "policies": [p.dict() for p in request.app.state.POLICIES_RQ],
                 "type": {"name": "REQUESTS"},
             },
             {
-                "policies": request.app.state.POLICIES_PU,
+                "policies": [p.dict() for p in request.app.state.POLICIES_PU],
                 "type": {"name": "PROCESSING_UNITS"},
             },
         ],
@@ -77,8 +67,8 @@ def get_contract(request: Request):
 def get_stats(request: Request):
     return {
         "data": {
-            "REQUESTS": {p["samplingPeriod"]: p["capacity"] for p in request.app.state.POLICIES_RQ},
-            "PROCESSING_UNITS": {p["samplingPeriod"]: p["capacity"] for p in request.app.state.POLICIES_PU},
+            "REQUESTS": {p.samplingPeriod: p.capacity for p in request.app.state.POLICIES_RQ},
+            "PROCESSING_UNITS": {p.samplingPeriod: p.capacity for p in request.app.state.POLICIES_PU},
         },
     }
 
@@ -87,7 +77,7 @@ def get_stats(request: Request):
 def put_policies_pu(policies: List[Policy], request: Request):
     request.app.state.POLICIES_PU = policies
     # reset the rate limiting buckets values and the filling time:
-    request.app.state.buckets_pu = [p["capacity"] for p in policies]
+    request.app.state.buckets_pu = [p.capacity for p in policies]
     request.app.state.last_increment_time = time.monotonic()
     return Response(status_code=202)
 
@@ -95,7 +85,7 @@ def put_policies_pu(policies: List[Policy], request: Request):
 @app.put("/policies/RQ")
 def put_policies_rq(policies: List[Policy], request: Request):
     request.app.state.POLICIES_RQ = policies
-    request.app.state.buckets_rq = [p["capacity"] for p in policies]
+    request.app.state.buckets_rq = [p.capacity for p in policies]
     request.app.state.last_increment_time = time.monotonic()
     return Response(status_code=202)
 
@@ -113,26 +103,30 @@ async def post_refill_buckets(request: Request):
 
     # enough time has passed, we need to increment all buckets:
     for i, policy in enumerate(request.app.state.POLICIES_RQ):
-        fill_per_s = 10 ** 9 / policy["nanosBetweenRefills"]
+        fill_per_s = 10 ** 9 / policy.nanosBetweenRefills
         request.app.state.buckets_rq[i] = min(
-            policy["capacity"],
+            policy.capacity,
             request.app.state.buckets_rq[i] + time_passed * fill_per_s,
         )
     for i, policy in enumerate(request.app.state.POLICIES_PU):
-        fill_per_s = 10 ** 9 / policy["nanosBetweenRefills"]
+        fill_per_s = 10 ** 9 / policy.nanosBetweenRefills
         request.app.state.buckets_pu[i] = min(
-            policy["capacity"],
+            policy.capacity,
             request.app.state.buckets_pu[i] + time_passed * fill_per_s,
         )
 
+    logging.info(
+        f'RL buckets state: PU: {", ".join(format(x, ".1f") for x in request.app.state.buckets_pu)}, RQ: {", ".join(format(x, ".1f") for x in request.app.state.buckets_rq)}'
+    )
+
 
 @app.get("/data")
-async def get_data(processing_units: int, request: Request):
+async def get_data(processing_units: int, delay: float = None, request: Request = None):
     """
     This endpoint mocks a request for data on Sentinel Hub:
     - checks buckets to determine if 429 should be returned
     - decrements buckets
-    - sleeps for some time, then returns
+    - sleeps for some time (if delay is specified), then returns
     """
     # check if any policy is depleted - if so, return 429:
     for bucket_value in request.app.state.buckets_rq:
@@ -149,7 +143,8 @@ async def get_data(processing_units: int, request: Request):
         request.app.state.buckets_pu[i] -= processing_units
 
     # sleep for some time and return response 200:
-    await asyncio.sleep(0.5 + random.random())  # 0.5 - 1.5 s delay
+    if delay:
+        await asyncio.sleep(delay)
     return Response(content="", status_code=200)
 
 
