@@ -53,78 +53,96 @@ def calculate_ideal_time(policies, total_requests, pu_per_request):
     return ideal_time
 
 
+def worker(n_requests, use_rlguard, pu_per_request):
+    req = requests.Session()
+    url = f"{MOCKSH_ROOT_URL}/data"
+    max_retries = 5
+    count_success = 0
+    count_429 = 0
+    for i in range(n_requests):
+        for t in range(max_retries):
+            if use_rlguard:
+                delay = apply_for_request(pu_per_request)
+                if delay > 0:
+                    # print(f"Sleeping for {delay}s (rlguard)")
+                    time.sleep(delay)
+
+            # trigger mock service to update its buckets:
+            r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
+            r2.raise_for_status()
+
+            r = req.get(url, params={"processing_units": pu_per_request})
+            if r.status_code == 200:
+                count_success += 1
+                break
+            if r.status_code == 429:
+                count_429 += 1
+                if use_rlguard:
+                    delay = 0.5
+                    # print(f"Sleeping for {delay}s (got 429 with rlguard)")
+                else:
+                    delay = 2 ** t  # exponentional backoff
+                    # print(f"Sleeping for {delay}s (exp. backoff)")
+                time.sleep(delay)
+                continue
+            r.raise_for_status()
+        else:
+            raise Exception("Request has failed! This should never happen!!!")
+    return count_success, count_429
+
+
 @pytest.mark.parametrize(
-    "policies,total_requests,use_rlguard",
+    "policies,requests_per_worker,n_workers,use_rlguard",
     [
+        (
+            [("RQ", 1, 1), ("PU", 2, 1)],
+            1,
+            1,
+            True,
+        ),
         (
             [("RQ", 1000, 100), ("PU", 1000, 100)],
             100,
+            1,
             False,
         ),
         (
             [("RQ", 1000, 100), ("PU", 1000, 100)],
             100,
+            1,
             True,
         ),
         (
             [("RQ", 50, 10), ("PU", 200, 10)],
             100,
+            1,
             False,
         ),
         (
             [("RQ", 50, 10), ("PU", 200, 10)],
             100,
+            1,
             True,
         ),
     ],
 )
-def test_ratelimiting(set_policies, capsys, policies, total_requests, use_rlguard):
-    req = requests.Session()
-
+def test_ratelimiting(set_policies, capsys, policies, requests_per_worker, n_workers, use_rlguard):
     set_policies(policies)
-    url = f"{MOCKSH_ROOT_URL}/data"
     pu_per_request = 2
-    max_retries = 5
+    total_requests = requests_per_worker * n_workers
 
     start_time = time.monotonic()
     count_success = 0
     count_429 = 0
     with capsys.disabled():  # print out output
-        print(f"\n{'=' * 35}\nExpected test time: > {calculate_ideal_time(policies, total_requests, pu_per_request)}s")
-        for i in range(total_requests):
-            for t in range(max_retries):
-                if use_rlguard:
-                    delay = apply_for_request(pu_per_request)
-                    if delay > 0:
-                        # print(f"Sleeping for {delay}s (rlguard)")
-                        time.sleep(delay)
+        print(f"\n{'=' * 35}")
+        policies_nice = [f"{x[1]} {x[0]} / {x[2]} s" for x in policies]
+        print(f"Test: use rlguard [{use_rlguard}], total requests [{total_requests}], policies [{', '.join(policies_nice)}]")
+        print(f"Expected test time: > {calculate_ideal_time(policies, total_requests, pu_per_request)}s")
 
-                # trigger mock service to update its buckets:
-                r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
-                r2.raise_for_status()
-
-                r = req.get(url, params={"processing_units": pu_per_request})
-                if r.status_code == 200:
-                    count_success += 1
-                    break
-                if r.status_code == 429:
-                    count_429 += 1
-                    if use_rlguard:
-                        delay = 0.5
-                        # print(f"Sleeping for {delay}s (got 429 with rlguard)")
-                    else:
-                        delay = 2 ** t  # exponentional backoff
-                        # print(f"Sleeping for {delay}s (exp. backoff)")
-                    time.sleep(delay)
-                    continue
-                r.raise_for_status()
-            else:
-                raise Exception("Request has failed! This should never happen!!!")
+        count_success, count_429 = worker(requests_per_worker, use_rlguard, pu_per_request)
 
         total_time = time.monotonic() - start_time
-
-        ideal_time = calculate_ideal_time(policies, total_requests, pu_per_request)
-
         print(f"Total_time: {total_time}s")
         print(f"Number of 429 responses: {count_429}")
         print(f"Successfully completed: {count_success} / {total_requests}")
