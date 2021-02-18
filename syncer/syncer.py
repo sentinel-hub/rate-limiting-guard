@@ -23,7 +23,10 @@ POLICY_TYPES_SHORT_NAMES = {
 REDIS_REMAINING_KEY = b"remaining"
 REDIS_REFILLS_KEY = b"refill_ns"
 REDIS_TYPES_KEY = b"types"
+REDIS_SYNCER_ALIVE_KEY = b"syncer_alive"
+REDIS_SYNCER_ALIVE_VALUE = b"1"
 
+min_revisit_time_ms = None
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
@@ -113,21 +116,24 @@ def adjust_filling(nanos_between_refills):
     return fill_interval_s, n_at_once
 
 
-def redis_init_rate_limits(rate_limits):
+def redis_init_rate_limits(rate_limits, min_revisit_time_ms):
     with rds.pipeline() as pipe:
         pipe.delete(REDIS_REMAINING_KEY, REDIS_REFILLS_KEY, REDIS_TYPES_KEY)
         for policy in rate_limits:
             pipe.hset(REDIS_REMAINING_KEY, policy["id"], policy["initial"])
             pipe.hset(REDIS_REFILLS_KEY, policy["id"], policy["nanos_between_refills"])
             pipe.hset(REDIS_TYPES_KEY, policy["id"], policy["type"])
+
+        pipe.set(REDIS_SYNCER_ALIVE_KEY, REDIS_SYNCER_ALIVE_VALUE, px=min_revisit_time_ms)
         pipe.execute()
 
 
-def redis_fill_bucket(field, incr_by, limit):
+def redis_fill_bucket(field, incr_by, limit, min_revisit_time_ms):
     """
-    Since we can't atomically check and increment conditionally, we increment, then
-    check the new value, and decrement back if over the limit.
+    Fills the rate-limiting bucket.
     """
+    # Since we can't atomically check and increment conditionally, we increment, then
+    # check the new value, and decrement back if over the limit.
     new_value = rds.hincrbyfloat(REDIS_REMAINING_KEY, field, incr_by)
     if int(new_value) > limit:
         decr_by = int(new_value) - limit
@@ -136,8 +142,10 @@ def redis_fill_bucket(field, incr_by, limit):
     else:
         logging.debug(f"Filled {field} to {new_value} (limit {limit})")
 
+    rds.set(REDIS_SYNCER_ALIVE_KEY, REDIS_SYNCER_ALIVE_VALUE, px=min_revisit_time_ms)
 
-def run_syncing(rate_limits):
+
+def run_syncing(rate_limits, min_revisit_time_ms):
     """
     Runs a scheduler which fills the rate limiting buckets in Redis.
 
@@ -155,7 +163,7 @@ def run_syncing(rate_limits):
         logging.debug(
             f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at:.3f}, {now - scheduled_at:.3f}s late."
         )
-        redis_fill_bucket(policy_id, fill_quantity, capacity)
+        redis_fill_bucket(policy_id, fill_quantity, capacity, min_revisit_time_ms)
 
         # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
         adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
@@ -210,8 +218,12 @@ def main():
         user_id = extract_user_id(auth_token)
         rate_limits = fetch_rate_limits(user_id, auth_token)
 
-        redis_init_rate_limits(rate_limits)
-        run_syncing(rate_limits)
+        # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
+        # key to twice the time we should refill the buckets in:
+        min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
+
+        redis_init_rate_limits(rate_limits, min_revisit_time_ms)
+        run_syncing(rate_limits, min_revisit_time_ms)
 
         logging.info("Restarting...")
 

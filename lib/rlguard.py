@@ -9,11 +9,17 @@ import redis
 REDIS_REMAINING_KEY = b"remaining"
 REDIS_REFILLS_KEY = b"refill_ns"
 REDIS_TYPES_KEY = b"types"
+REDIS_SYNCER_ALIVE_KEY = b"syncer_alive"
+REDIS_SYNCER_ALIVE_VALUE = b"1"
 
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+
+class SyncerDownException(Exception):
+    pass
 
 
 class PolicyType(Enum):
@@ -76,16 +82,25 @@ def calculate_processing_units(
 
 def apply_for_request(processing_units: float) -> float:
     """
-    Decrements & fetches the Redis counters and calculates the delay.
+    Decrements & fetches the Redis counters, calculates the delay and returns it.
+
+    If syncer service is down (detected by self-expiring key not being in Redis), raises
+    `SyncerDownException`. If this exception is caught, worker should handle retries in
+    conventional way (ideally exponential backoff, limited to the time it takes for the
+    offending bucket to refill itself from 0 to full).
     """
     # figure out the types of the buckets so we know how much to decrement them:
     with rds.pipeline() as pipe:
         pipe.hgetall(REDIS_TYPES_KEY)
         pipe.hgetall(REDIS_REFILLS_KEY)
-        policy_types, policy_refills = pipe.execute()
+        pipe.get(REDIS_SYNCER_ALIVE_KEY)
+        policy_types, policy_refills, syncer_alive = pipe.execute()
 
     logging.debug(f"Policy types: {policy_types}")
     logging.debug(f"Policy bucket refills: {policy_refills}ns")
+
+    if syncer_alive != REDIS_SYNCER_ALIVE_VALUE:
+        raise SyncerDownException("Syncer service is down - revert to manual retries.")
 
     # decrement buckets according to their type:
     with rds.pipeline() as pipe:
