@@ -4,7 +4,6 @@ import logging
 import math
 import os
 import sched
-import signal
 import time
 
 import jwt
@@ -39,26 +38,6 @@ logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 scheduler = None
 scheduled_tasks = {}
-
-
-def sighup_signal_handler(signum, frame):
-    global scheduler, scheduled_tasks
-    logging.info("Received SIGHUP signal, stopping all scheduled tasks:")
-    if not scheduler:
-        logging.info("No tasks were running yet, ignoring signal.")
-        return
-
-    keys = list(scheduled_tasks.keys())
-    for key in keys:
-        try:
-            scheduler.cancel(scheduled_tasks[key])
-            del scheduled_tasks[key]
-        except ValueError:
-            pass
-    if not scheduler.empty():
-        raise Exception("Scheduler is not empty, even though we have stopped all the tasks")
-    scheduler = None
-    logging.info(f"Tasks stopped.")
 
 
 def request_auth_token(client_id, client_secret):
@@ -245,5 +224,4 @@ def main():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGHUP, sighup_signal_handler)
     main()

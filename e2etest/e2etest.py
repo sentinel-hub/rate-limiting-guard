@@ -37,7 +37,7 @@ def set_policies():
             r.raise_for_status()
 
         # syncer service should re-read its policies:
-        subprocess.call(["docker", "kill", "--signal=SIGHUP", SYNCER_CONTAINER_NAME])
+        subprocess.call(["docker", "kill", "--signal=SIGTERM", SYNCER_CONTAINER_NAME])
 
     return wrapped
 

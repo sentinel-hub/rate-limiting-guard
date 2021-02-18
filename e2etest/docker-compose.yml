@@ -23,6 +23,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    restart: always
     environment:
       CLIENT_ID: "FAKE_CLIENT_ID"
       CLIENT_SECRET: "FAKE_CLIENT_SECRET"
