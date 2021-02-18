@@ -42,63 +42,90 @@ def set_policies():
     return wrapped
 
 
-# @pytest.mark.parametrize("use_syncer", [
-#     (True,),
-#     (False,),
-# ])
-def test_ratelimiting(set_policies, capsys):
+def calculate_ideal_time(policies, total_requests, pu_per_request):
+    ideal_time = 0
+    for policy_type, capacity, refill_time in policies:
+        if capacity >= total_requests:
+            continue
+        refill_rate = capacity / refill_time
+        ideal_time = max(ideal_time, (total_requests - capacity) / refill_rate)
+    return ideal_time
+
+
+@pytest.mark.parametrize(
+    "policies,total_requests,use_rlguard",
+    [
+        (
+            [("RQ", 1000, 100), ("PU", 1000, 100)],
+            100,
+            False,
+        ),
+        (
+            [("RQ", 1000, 100), ("PU", 1000, 100)],
+            100,
+            True,
+        ),
+        (
+            [("RQ", 50, 10), ("PU", 200, 10)],
+            100,
+            False,
+        ),
+        (
+            [("RQ", 50, 10), ("PU", 200, 10)],
+            100,
+            True,
+        ),
+    ],
+)
+def test_ratelimiting(set_policies, capsys, policies, total_requests, use_rlguard):
     req = requests.Session()
 
-    set_policies(
-        [
-            ("RQ", 20, 10),
-            ("PU", 40, 10),
-        ]
-    )
+    set_policies(policies)
     url = f"{MOCKSH_ROOT_URL}/data"
-    processing_units = 2
+    pu_per_request = 2
     max_retries = 5
-    total_requests = 100
-
-    use_syncer = True
 
     start_time = time.monotonic()
     count_success = 0
     count_429 = 0
     with capsys.disabled():  # print out output
+        print(f"\n{'=' * 35}\nExpected test time: > {calculate_ideal_time(policies, total_requests, pu_per_request)}s")
         for i in range(total_requests):
             for t in range(max_retries):
-                if use_syncer:
-                    delay = apply_for_request(processing_units)
+                if use_rlguard:
+                    delay = apply_for_request(pu_per_request)
                     if delay > 0:
-                        print(f"Sleeping for {delay}s (rlguard)")
+                        # print(f"Sleeping for {delay}s (rlguard)")
                         time.sleep(delay)
 
                 # trigger mock service to update its buckets:
                 r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
                 r2.raise_for_status()
 
-                r = req.get(url, params={"processing_units": processing_units})
+                r = req.get(url, params={"processing_units": pu_per_request})
                 if r.status_code == 200:
                     count_success += 1
                     break
                 if r.status_code == 429:
                     count_429 += 1
-                    if use_syncer:
+                    if use_rlguard:
                         delay = 0.5
-                        print(f"Sleeping for {delay}s (got 429 with rlguard)")
+                        # print(f"Sleeping for {delay}s (got 429 with rlguard)")
                     else:
                         delay = 2 ** t  # exponentional backoff
-                        print(f"Sleeping for {delay}s (exp. backoff)")
+                        # print(f"Sleeping for {delay}s (exp. backoff)")
                     time.sleep(delay)
                     continue
                 r.raise_for_status()
             else:
-                raise Exception("A request has failed! This should never happen!!!")
+                raise Exception("Request has failed! This should never happen!!!")
 
         total_time = time.monotonic() - start_time
 
-        print(f"{'*' * 30}\nTotal_time: {total_time}")
+        ideal_time = calculate_ideal_time(policies, total_requests, pu_per_request)
+
+        print(f"Total_time: {total_time}s")
         print(f"Number of 429 responses: {count_429}")
         print(f"Successfully completed: {count_success} / {total_requests}")
+        print(f"{'=' * 35}\n")
     assert True
