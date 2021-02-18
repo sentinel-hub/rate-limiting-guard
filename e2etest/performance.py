@@ -89,7 +89,6 @@ def worker_func(
                     delay = 0.5
                 else:
                     delay = 2 ** t  # exponentional backoff
-                    # uncomment to enable jitter:
                     if use_jitter:
                         jitter = random.random() - 0.5  # -0.5 - 0.5
                         delay += jitter
