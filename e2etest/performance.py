@@ -82,8 +82,8 @@ def worker_func(
                 try:
                     delay = apply_for_request(pu_per_request)
                 except SyncerDownException:
-                    if print_debug:
-                        print("Syncer is down!")
+                    if not syncer_down:
+                        print("--- syncer is down! ---")
                     syncer_down = True
                     delay = 0
                 if delay > 0:
@@ -175,7 +175,7 @@ def test_ratelimiting(
     # additional test settings:
     use_jitter = False
     use_startup_delay = False
-    print_debug = True
+    print_debug = False
 
     start_time = time.monotonic()
     with capsys.disabled():  # print out output
