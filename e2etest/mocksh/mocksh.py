@@ -32,6 +32,8 @@ class Policy(BaseModel):
     nanosBetweenRefills: int
 
 
+# We use global app state to remember policies in effect, buckets values and last increment time of
+# buckets (allowing us to refill them correctly based on time passed).
 app.state.POLICIES_PU: List[Policy] = [
     Policy(capacity=1000, samplingPeriod="PT1M", nanosBetweenRefills=60000000),
     Policy(capacity=400000, samplingPeriod="PT744H", nanosBetweenRefills=6696000000),
@@ -93,11 +95,11 @@ def put_policies_rq(policies: List[Policy], request: Request):
 @app.post("/refill_buckets")
 async def post_refill_buckets(request: Request):
     """
-    Maintenance endpoint - updates rate limiting buckets if needed. Should be called around every second or so.
+    Maintenance endpoint - updates rate limiting buckets if needed. Should be called periodically.
     """
     now = time.monotonic()
     time_passed = now - request.app.state.last_increment_time
-    if time_passed < 0.8:  # no need to refill too often
+    if time_passed < 1.0:  # no need to refill too often
         return
     request.app.state.last_increment_time = now
 
@@ -126,7 +128,7 @@ async def get_data(processing_units: int, delay: float = None, request: Request 
     This endpoint mocks a request for data on Sentinel Hub:
     - checks buckets to determine if 429 should be returned
     - decrements buckets
-    - sleeps for some time (if delay is specified), then returns
+    - sleeps for some time (if delay is specified), then returns response 200
     """
     # check if any policy is depleted - if so, return 429:
     for bucket_value in request.app.state.buckets_rq:
