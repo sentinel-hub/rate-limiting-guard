@@ -36,10 +36,6 @@ SENTINELHUB_ROOT_URL = os.environ.get("SENTINELHUB_ROOT_URL", "https://services.
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 
-scheduler = None
-scheduled_tasks = {}
-
-
 def request_auth_token(client_id, client_secret):
     r = requests.post(
         f"{SENTINELHUB_ROOT_URL}/oauth/token",
@@ -151,7 +147,6 @@ def run_syncing(rate_limits):
     way. However the difference should be negligable and should not matter, because the process
     fixes itself in time if we have either too big or too small value in a bucket.
     """
-    global scheduler, scheduled_tasks
     scheduler = sched.scheduler(time.time, time.sleep)
     PRIORITY = 1
 
@@ -171,8 +166,7 @@ def run_syncing(rate_limits):
             capacity,
             scheduled_at + fill_interval_s,
         )
-        task = scheduler.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
-        scheduled_tasks[policy_id] = task
+        scheduler.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
 
     # initialize the scheduler:
     now = time.time()
@@ -190,8 +184,7 @@ def run_syncing(rate_limits):
             capacity,
             scheduled_at,
         )
-        task = scheduler.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
-        scheduled_tasks[policy_id] = task
+        scheduler.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
     scheduler.run()
 
 
