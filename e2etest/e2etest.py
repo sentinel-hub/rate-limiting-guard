@@ -36,8 +36,9 @@ def set_policies():
             r = requests.put(f"{MOCKSH_ROOT_URL}/policies/{policy_type}", json=data[policy_type])
             r.raise_for_status()
 
-        # syncer service should re-read its policies:
-        subprocess.call(["docker", "kill", "--signal=SIGTERM", SYNCER_CONTAINER_NAME])
+        # syncer service should re-read its policies, the easiest way to force it to do so is to simply restart it:
+        subprocess.call(["docker", "restart", "-t", "1", SYNCER_CONTAINER_NAME])
+        time.sleep(2)
 
     return wrapped
 
