@@ -1,4 +1,6 @@
+import concurrent.futures
 import os
+import random
 import subprocess
 import sys
 import time
@@ -53,10 +55,17 @@ def calculate_ideal_time(policies, total_requests, pu_per_request):
     return ideal_time
 
 
-def worker(n_requests, use_rlguard, pu_per_request):
+def worker_func(
+    n_requests, use_rlguard, pu_per_request, max_delay, use_jitter=False, use_startup_delay=False, print_delays=False
+):
     req = requests.Session()
     url = f"{MOCKSH_ROOT_URL}/data"
-    max_retries = 5
+    max_retries = 100  # this number must be big, otherwise there will be failures with some (non-optimal) settings
+
+    # add (per-worker) random startup delay:
+    if use_startup_delay:
+        time.sleep(random.random())  # up to 1s
+
     count_success = 0
     count_429 = 0
     for i in range(n_requests):
@@ -64,7 +73,6 @@ def worker(n_requests, use_rlguard, pu_per_request):
             if use_rlguard:
                 delay = apply_for_request(pu_per_request)
                 if delay > 0:
-                    # print(f"Sleeping for {delay}s (rlguard)")
                     time.sleep(delay)
 
             # trigger mock service to update its buckets:
@@ -79,10 +87,15 @@ def worker(n_requests, use_rlguard, pu_per_request):
                 count_429 += 1
                 if use_rlguard:
                     delay = 0.5
-                    # print(f"Sleeping for {delay}s (got 429 with rlguard)")
                 else:
                     delay = 2 ** t  # exponentional backoff
-                    # print(f"Sleeping for {delay}s (exp. backoff)")
+                    # uncomment to enable jitter:
+                    if use_jitter:
+                        jitter = random.random() - 0.5  # -0.5 - 0.5
+                        delay += jitter
+                delay = min(delay, max_delay)
+                if print_delays:
+                    print(f"Sleeping for {delay}s (try: {t + 1})")
                 time.sleep(delay)
                 continue
             r.raise_for_status()
@@ -130,20 +143,43 @@ def test_ratelimiting(set_policies, capsys, policies, requests_per_worker, n_wor
     set_policies(policies)
     pu_per_request = 2
     total_requests = requests_per_worker * n_workers
+    max_delay = min([p[2] for p in policies])
+
+    # additional test settings:
+    use_jitter = False
+    use_startup_delay = False
+    print_delays = False
 
     start_time = time.monotonic()
-    count_success = 0
-    count_429 = 0
     with capsys.disabled():  # print out output
         print(f"\n{'=' * 35}")
         policies_nice = [f"{x[1]} {x[0]} / {x[2]} s" for x in policies]
-        print(f"Test: use rlguard [{use_rlguard}], total requests [{total_requests}], policies [{', '.join(policies_nice)}]")
-        print(f"Expected test time: > {calculate_ideal_time(policies, total_requests, pu_per_request)}s")
+        print(
+            f"Test: use rlguard [{use_rlguard}], total requests [{total_requests}], workers [{n_workers}], policies [{', '.join(policies_nice)}]"
+        )
+        print(f"Expected test time: > {calculate_ideal_time(policies, total_requests, pu_per_request):.1f}s")
 
-        count_success, count_429 = worker(requests_per_worker, use_rlguard, pu_per_request)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
+            future_stats = [
+                executor.submit(
+                    worker_func,
+                    requests_per_worker,
+                    use_rlguard,
+                    pu_per_request,
+                    max_delay,
+                    use_jitter,
+                    use_startup_delay,
+                    print_delays,
+                )
+                for _ in range(n_workers)
+            ]
+            concurrent.futures.wait(future_stats)
 
         total_time = time.monotonic() - start_time
-        print(f"Total_time: {total_time}s")
+        stats = [f.result() for f in future_stats]
+        count_success = sum([s[0] for s in stats])
+        count_429 = sum([s[1] for s in stats])
+        print(f"Total_time: {total_time:.1f}s")
         print(f"Number of 429 responses: {count_429}")
         print(f"Successfully completed: {count_success} / {total_requests}")
         print(f"{'=' * 35}\n")
