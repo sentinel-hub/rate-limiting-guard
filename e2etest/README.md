@@ -1,6 +1,6 @@
 ## Tests
 
-To run end-to-end tests, first install the python packages needed:
+To run end-to-end performance tests, first install the python packages needed:
 ```
 $ cd e2etest/
 $ pipenv install
@@ -12,6 +12,9 @@ $ docker-compose up -d
 $ pipenv shell
 <pipenv> $ pytest performance.py
 ```
+
+There are some tests already defined (see the parameters to `test_ratelimiting` test), but to perform performance testing they should be adapted as required.
+
 
 ### Performance results
 
