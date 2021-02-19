@@ -178,7 +178,7 @@ def test_ratelimiting(set_policies, capsys, policies, requests_per_worker, n_wor
         stats = [f.result() for f in future_stats]
         count_success = sum([s[0] for s in stats])
         count_429 = sum([s[1] for s in stats])
-        print(f"Total_time: {total_time:.1f}s")
+        print(f"Total time: {total_time:.1f}s")
         print(f"Number of 429 responses: {count_429}")
         print(f"Successfully completed: {count_success} / {total_requests}")
         print(f"{'=' * 35}\n")
