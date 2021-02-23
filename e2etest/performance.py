@@ -90,10 +90,18 @@ def worker_func(
                     time.sleep(delay)
 
             # trigger mock service to update its buckets:
-            r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
-            r2.raise_for_status()
+            try:
+                r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
+                r2.raise_for_status()
+            except Exception as ex:
+                print(f"--- exception while doing a refill request: {str(ex)} - ignoring ---")
+                pass
 
-            r = req.get(url, params={"processing_units": pu_per_request})
+            try:
+                r = req.get(url, params={"processing_units": pu_per_request})
+            except Exception as ex:
+                print(f"--- exception while doing a request: {str(ex)} - retrying ---")
+                continue
             if r.status_code == 200:
                 count_success += 1
                 break
