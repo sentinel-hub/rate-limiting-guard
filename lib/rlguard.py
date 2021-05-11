@@ -1,19 +1,20 @@
 from enum import Enum
+import json
+from kazoo.client import KazooClient
 import logging
 import os
 from typing import Optional
 
-import redis
+
+ZOOKEEPER_KEY_BASE = "/openeo/rlguard"
+ZOOKEEPER_REMAINING_KEY = f"{ZOOKEEPER_KEY_BASE}/remaining"
+ZOOKEEPER_REFILLS_KEY = f"{ZOOKEEPER_KEY_BASE}/refill_ns"
+ZOOKEEPER_TYPES_KEY = f"{ZOOKEEPER_KEY_BASE}/types"
 
 
-REDIS_REMAINING_KEY = b"remaining"
-REDIS_REFILLS_KEY = b"refill_ns"
-REDIS_TYPES_KEY = b"types"
-
-
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
+zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
+zk.start()
 
 
 class PolicyType(Enum):
@@ -86,23 +87,20 @@ def apply_for_request(processing_units: float) -> float:
     Decrements & fetches the Redis counters and calculates the delay.
     """
     # figure out the types of the buckets so we know how much to decrement them:
-    with rds.pipeline() as pipe:
-        pipe.hgetall(REDIS_TYPES_KEY)
-        pipe.hgetall(REDIS_REFILLS_KEY)
-        policy_types, policy_refills = pipe.execute()
+    policy_refills = json.loads(zk.get(ZOOKEEPER_REFILLS_KEY)[0].decode('utf-8'))
+    policy_types = json.loads(zk.get(ZOOKEEPER_TYPES_KEY)[0].decode('utf-8'))
 
     logging.debug(f"Policy types: {policy_types}")
     logging.debug(f"Policy bucket refills: {policy_refills}ns")
 
     # decrement buckets according to their type:
-    with rds.pipeline() as pipe:
-        buckets_types_items = policy_types.items()
-        for policy_id, policy_type in buckets_types_items:
-            pipe.hincrbyfloat(
-                REDIS_REMAINING_KEY, policy_id, -processing_units if policy_type == PolicyType.PROCESSING_UNITS else -1
-            )
-        new_remaining = pipe.execute()
-        new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
+    buckets_types_items = policy_types.items()
+    new_remaining = []
+    for policy_id, policy_type in buckets_types_items:
+        policy_remaining = zk.Counter(f"{ZOOKEEPER_REMAINING_KEY}/{policy_id}", default=0.0)
+        policy_remaining -= processing_units if policy_type == PolicyType.PROCESSING_UNITS else 1.0
+        new_remaining.append(policy_remaining.value)
+    new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
 
     logging.debug(f"Bucket values after decrementing them: {new_remaining}")
     wait_times_ns = [-new_remaining[policy_id] * float(policy_refills[policy_id]) for policy_id in new_remaining.keys()]

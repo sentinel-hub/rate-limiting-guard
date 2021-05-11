@@ -108,7 +108,7 @@ def main():
     N_TRIES = 5
     for iteration in range(N_TRIES):
         try:
-            get_map(auth_token, "output.jpg")
+            get_map(auth_token, "output.png")
             break  # request succeeded, no need to retry it
         except requests.exceptions.HTTPError:
             # there was an error - perform exponential backoff

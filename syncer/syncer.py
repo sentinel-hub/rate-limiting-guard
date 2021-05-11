@@ -1,5 +1,6 @@
 from enum import Enum
 import json
+from kazoo.client import KazooClient
 import logging
 import math
 import os
@@ -7,7 +8,6 @@ import sched
 import time
 
 import jwt
-import redis
 import requests
 
 
@@ -20,15 +20,15 @@ POLICY_TYPES_SHORT_NAMES = {
     "PROCESSING_UNITS": PolicyType.PROCESSING_UNITS,
     "REQUESTS": PolicyType.REQUESTS,
 }
-REDIS_REMAINING_KEY = b"remaining"
-REDIS_REFILLS_KEY = b"refill_ns"
-REDIS_TYPES_KEY = b"types"
 
+ZOOKEEPER_KEY_BASE = "/openeo/rlguard"
+ZOOKEEPER_REMAINING_KEY = f"{ZOOKEEPER_KEY_BASE}/remaining"
+ZOOKEEPER_REFILLS_KEY = f"{ZOOKEEPER_KEY_BASE}/refill_ns"
+ZOOKEEPER_TYPES_KEY = f"{ZOOKEEPER_KEY_BASE}/types"
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
-
+ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
+zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
+zk.start()
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
@@ -110,24 +110,39 @@ def adjust_filling(nanos_between_refills):
     return fill_interval_s, n_at_once
 
 
-def redis_init_rate_limits(rate_limits):
-    with rds.pipeline() as pipe:
-        for policy in rate_limits:
-            pipe.hset(REDIS_REMAINING_KEY, policy["id"], policy["initial"])
-            pipe.hset(REDIS_REFILLS_KEY, policy["id"], policy["nanos_between_refills"])
-            pipe.hset(REDIS_TYPES_KEY, policy["id"], policy["type"])
-        pipe.execute()
+def zookeeper_init_rate_limits(rate_limits):
+    # TODO: mimic counter structure instead? (/openeo/rlguard/remaining/some_policy_id)
+    policy_refills = {}
+    policy_types = {}
+
+    for policy in rate_limits:
+        policy_refills[policy["id"]] = policy["nanos_between_refills"]
+        policy_types[policy["id"]] = policy["type"]
+        policy_counter_key = f"{ZOOKEEPER_REMAINING_KEY}/{policy['id']}"
+        zk.delete(policy_counter_key)
+        policy_remaining = zk.Counter(policy_counter_key, default=0.0)
+        policy_remaining += float(policy["initial"])
+
+    zk.ensure_path(ZOOKEEPER_REFILLS_KEY)
+    zk.set(ZOOKEEPER_REFILLS_KEY, json.dumps(policy_refills).encode('utf-8'))
+
+    zk.ensure_path(ZOOKEEPER_TYPES_KEY)
+    zk.set(ZOOKEEPER_TYPES_KEY, json.dumps(policy_types).encode('utf-8'))
 
 
-def redis_fill_bucket(field, incr_by, limit):
+def zookeeper_fill_bucket(field, incr_by, limit):
     """
     Since we can't atomically check and increment conditionally, we increment, then
     check the new value, and decrement back if over the limit.
     """
-    new_value = rds.hincrbyfloat(REDIS_REMAINING_KEY, field, incr_by)
+    policy_remaining = zk.Counter(f"{ZOOKEEPER_REMAINING_KEY}/{field}", default=0.0)
+    policy_remaining += float(incr_by)
+
+    new_value = policy_remaining.value
     if int(new_value) > limit:
         decr_by = int(new_value) - limit
-        final_value = rds.hincrbyfloat(REDIS_REMAINING_KEY, field, -decr_by)
+        policy_remaining -= float(decr_by)
+        final_value = policy_remaining.value
         logging.debug(f"Filled {field} to {final_value} (limit {limit} reached)")
     else:
         logging.debug(f"Filled {field} to {new_value} (limit {limit})")
@@ -151,7 +166,7 @@ def run_syncing(rate_limits):
         logging.debug(
             f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at:.3f}, {now - scheduled_at:.3f}s late."
         )
-        redis_fill_bucket(policy_id, fill_quantity, capacity)
+        zookeeper_fill_bucket(policy_id, fill_quantity, capacity)
 
         # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
         adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
@@ -199,7 +214,9 @@ def main():
     user_id = extract_user_id(auth_token)
     rate_limits = fetch_rate_limits(user_id, auth_token)
 
-    redis_init_rate_limits(rate_limits)
+    print(rate_limits)
+
+    zookeeper_init_rate_limits(rate_limits)
     run_syncing(rate_limits)
 
 
