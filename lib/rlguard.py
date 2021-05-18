@@ -3,18 +3,14 @@ import json
 from kazoo.client import KazooClient
 import logging
 import os
-from typing import Optional
 
+from repository import ZooKeeperRepository
 
 ZOOKEEPER_KEY_BASE = "/openeo/rlguard"
-ZOOKEEPER_REMAINING_KEY = f"{ZOOKEEPER_KEY_BASE}/remaining"
-ZOOKEEPER_REFILLS_KEY = f"{ZOOKEEPER_KEY_BASE}/refill_ns"
-ZOOKEEPER_TYPES_KEY = f"{ZOOKEEPER_KEY_BASE}/types"
-
-
 ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
 zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
 zk.start()
+repository = ZooKeeperRepository(zk, ZOOKEEPER_KEY_BASE)
 
 
 class PolicyType(Enum):
@@ -87,8 +83,8 @@ def apply_for_request(processing_units: float) -> float:
     Decrements & fetches the Redis counters and calculates the delay.
     """
     # figure out the types of the buckets so we know how much to decrement them:
-    policy_refills = json.loads(zk.get(ZOOKEEPER_REFILLS_KEY)[0].decode('utf-8'))
-    policy_types = json.loads(zk.get(ZOOKEEPER_TYPES_KEY)[0].decode('utf-8'))
+    policy_refills = repository.get_policy_refills()
+    policy_types = repository.get_policy_types()
 
     logging.debug(f"Policy types: {policy_types}")
     logging.debug(f"Policy bucket refills: {policy_refills}ns")
@@ -97,9 +93,12 @@ def apply_for_request(processing_units: float) -> float:
     buckets_types_items = policy_types.items()
     new_remaining = []
     for policy_id, policy_type in buckets_types_items:
-        policy_remaining = zk.Counter(f"{ZOOKEEPER_REMAINING_KEY}/{policy_id}", default=0.0)
-        policy_remaining -= processing_units if policy_type == PolicyType.PROCESSING_UNITS else 1.0
-        new_remaining.append(policy_remaining.value)
+        new_value = repository.increment_counter(
+            policy_id,
+            -float(processing_units) if policy_type == PolicyType.PROCESSING_UNITS else -1.0
+        )
+
+        new_remaining.append(new_value)
     new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
 
     logging.debug(f"Bucket values after decrementing them: {new_remaining}")
