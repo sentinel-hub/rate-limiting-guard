@@ -74,7 +74,7 @@ def fetch_rate_limits(user_id, auth_token):
     for contract in contracts:
         for policy in contract["policies"]:
             policy_type_long = contract["type"]["name"]
-            policy_type = POLICY_TYPES_SHORT_NAMES[policy_type_long]
+            policy_type = POLICY_TYPES_SHORT_NAMES[policy_type_long].value
             policy_id = f'{policy_type}_{policy["capacity"]}_{policy["samplingPeriod"]}'
             remaining = stats[policy_type_long][policy["samplingPeriod"]]
             fill_interval_s, fill_quantity = adjust_filling(int(policy["nanosBetweenRefills"]))
@@ -84,7 +84,7 @@ def fetch_rate_limits(user_id, auth_token):
             rate_limits.append(
                 {
                     "id": policy_id,
-                    "type": policy_type.value,
+                    "type": policy_type,
                     "capacity": policy["capacity"],
                     "initial": remaining,
                     "fill_interval_s": fill_interval_s,
