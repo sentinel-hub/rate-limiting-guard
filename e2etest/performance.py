@@ -48,7 +48,6 @@ def restart_syncer():
 
 
 def stop_syncer():
-    # syncer service should re-read its policies, the easiest way to force it to do so is to simply restart it:
     subprocess.call(["docker", "stop", SYNCER_CONTAINER_NAME])
 
 
