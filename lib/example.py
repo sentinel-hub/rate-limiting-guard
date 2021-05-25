@@ -6,7 +6,7 @@ import time
 import requests
 import requests.exceptions
 
-from rlguard import calculate_processing_units, OutputFormat, apply_for_request
+from rlguard import calculate_processing_units, OutputFormat, apply_for_request, SyncerDownException
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
@@ -41,7 +41,12 @@ def get_map(auth_token, output_filename=None):
     pu = calculate_processing_units(False, 1024, 1024, 3, OutputFormat.OTHER, 1, False)
 
     # now apply for permission to make a request:
-    delay = apply_for_request(pu)
+    try:
+        delay = apply_for_request(pu)
+    except SyncerDownException:
+        delay = 0
+        # If this happens, retries should be handled manually, with exponential backoff (but limited to the
+        # time it takes to fill the offending bucket from empty to full).
 
     # if `apply_for_request` tells us to wait for some time before issuing the request, we should sleep a bit:
     if delay > 0.0:

@@ -12,7 +12,7 @@ import requests
 currentdir = os.path.dirname(os.path.realpath(__file__))
 parentdir = os.path.dirname(currentdir)
 sys.path.append(parentdir)
-from lib.rlguard import apply_for_request
+from lib.rlguard import apply_for_request, SyncerDownException
 
 
 MOCKSH_ROOT_URL = "http://127.0.0.1:8000"
@@ -38,11 +38,17 @@ def set_policies():
             r = requests.put(f"{MOCKSH_ROOT_URL}/policies/{policy_type}", json=data[policy_type])
             r.raise_for_status()
 
-        # syncer service should re-read its policies, the easiest way to force it to do so is to simply restart it:
-        subprocess.call(["docker", "restart", "-t", "1", SYNCER_CONTAINER_NAME])
-        time.sleep(2)
-
     return wrapped
+
+
+def restart_syncer():
+    # syncer service should re-read its policies, the easiest way to force it to do so is to simply restart it:
+    subprocess.call(["docker", "restart", "-t", "1", SYNCER_CONTAINER_NAME])
+    time.sleep(2)
+
+
+def stop_syncer():
+    subprocess.call(["docker", "stop", SYNCER_CONTAINER_NAME])
 
 
 def calculate_ideal_time(policies, total_requests, pu_per_request):
@@ -56,7 +62,7 @@ def calculate_ideal_time(policies, total_requests, pu_per_request):
 
 
 def worker_func(
-    n_requests, use_rlguard, pu_per_request, max_delay, use_jitter=False, use_startup_delay=False, print_delays=False
+    n_requests, use_rlguard, pu_per_request, max_delay, use_jitter=False, use_startup_delay=False, print_debug=False
 ):
     req = requests.Session()
     url = f"{MOCKSH_ROOT_URL}/data"
@@ -68,24 +74,41 @@ def worker_func(
 
     count_success = 0
     count_429 = 0
+    syncer_down = False
     for i in range(n_requests):
         for t in range(max_retries):
             if use_rlguard:
-                delay = apply_for_request(pu_per_request)
+                try:
+                    delay = apply_for_request(pu_per_request)
+                except SyncerDownException:
+                    if not syncer_down:
+                        print("--- syncer is down! ---")
+                    syncer_down = True
+                    delay = 0
                 if delay > 0:
                     time.sleep(delay)
 
             # trigger mock service to update its buckets:
-            r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
-            r2.raise_for_status()
+            try:
+                r2 = req.post(f"{MOCKSH_ROOT_URL}/refill_buckets")
+                r2.raise_for_status()
+            except Exception as ex:
+                print(f"--- exception while doing a refill request: {str(ex)} - ignoring ---")
+                pass
 
-            r = req.get(url, params={"processing_units": pu_per_request})
+            try:
+                r = req.get(url, params={"processing_units": pu_per_request})
+            except Exception as ex:
+                print(f"--- exception while doing a request: {str(ex)} - retrying ---")
+                continue
             if r.status_code == 200:
                 count_success += 1
                 break
             if r.status_code == 429:
                 count_429 += 1
-                if use_rlguard:
+                if use_rlguard and not syncer_down:
+                    # we got 429 even though syncer told us it would be ok - it happens, but let's
+                    # wait just a bit before asking it again:
                     delay = 0.5
                 else:
                     delay = 2 ** t  # exponentional backoff
@@ -93,7 +116,7 @@ def worker_func(
                         jitter = random.random() - 0.5  # -0.5 - 0.5
                         delay += jitter
                 delay = min(delay, max_delay)
-                if print_delays:
+                if print_debug:
                     print(f"Sleeping for {delay}s (try: {t + 1})")
                 time.sleep(delay)
                 continue
@@ -104,18 +127,20 @@ def worker_func(
 
 
 @pytest.mark.parametrize(
-    "policies,requests_per_worker,n_workers,use_rlguard",
+    "policies,requests_per_worker,n_workers,use_rlguard,simulate_dead_syncer",
     [
         (
             [("RQ", 1, 1), ("PU", 2, 1)],
             1,
             1,
             True,
+            False,
         ),
         (
             [("RQ", 1000, 100), ("PU", 1000, 100)],
             100,
             1,
+            False,
             False,
         ),
         (
@@ -123,23 +148,33 @@ def worker_func(
             100,
             1,
             True,
-        ),
-        (
-            [("RQ", 50, 10), ("PU", 200, 10)],
-            100,
-            1,
             False,
         ),
         (
             [("RQ", 50, 10), ("PU", 200, 10)],
             100,
             1,
+            False,
+            False,
+        ),
+        (
+            [("RQ", 10, 5), ("PU", 200, 10)],
+            20,
+            1,
             True,
+            False,
         ),
     ],
 )
-def test_ratelimiting(set_policies, capsys, policies, requests_per_worker, n_workers, use_rlguard):
+def test_ratelimiting(
+    set_policies, capsys, policies, requests_per_worker, n_workers, use_rlguard, simulate_dead_syncer
+):
     set_policies(policies)
+    if simulate_dead_syncer:
+        stop_syncer()
+    else:
+        restart_syncer()
+
     pu_per_request = 2
     total_requests = requests_per_worker * n_workers
     max_delay = min([p[2] for p in policies])
@@ -147,14 +182,14 @@ def test_ratelimiting(set_policies, capsys, policies, requests_per_worker, n_wor
     # additional test settings:
     use_jitter = False
     use_startup_delay = False
-    print_delays = False
+    print_debug = False
 
     start_time = time.monotonic()
     with capsys.disabled():  # print out output
         print(f"\n{'=' * 35}")
-        policies_nice = [f"{x[1]} {x[0]} / {x[2]} s" for x in policies]
+        policies_nice = ", ".join([f"{x[1]} {x[0]} / {x[2]} s" for x in policies])
         print(
-            f"Test: use rlguard [{use_rlguard}], total requests [{total_requests}], workers [{n_workers}], policies [{', '.join(policies_nice)}]"
+            f"Test: use rlguard [{use_rlguard}], total requests [{total_requests}], workers [{n_workers}], policies [{policies_nice}]"
         )
         print(f"Expected test time: > {calculate_ideal_time(policies, total_requests, pu_per_request):.1f}s")
 
@@ -168,7 +203,7 @@ def test_ratelimiting(set_policies, capsys, policies, requests_per_worker, n_wor
                     max_delay,
                     use_jitter,
                     use_startup_delay,
-                    print_delays,
+                    print_debug,
                 )
                 for _ in range(n_workers)
             ]
