@@ -30,12 +30,15 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
 
 
+SENTINELHUB_ROOT_URL = os.environ.get("SENTINELHUB_ROOT_URL", "https://services.sentinel-hub.com")
+
+
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 
 def request_auth_token(client_id, client_secret):
     r = requests.post(
-        "https://services.sentinel-hub.com/oauth/token",
+        f"{SENTINELHUB_ROOT_URL}/oauth/token",
         data={
             "grant_type": "client_credentials",
             "client_id": client_id,
@@ -54,7 +57,7 @@ def extract_user_id(auth_token):
 
 def fetch_rate_limits(user_id, auth_token):
     r = requests.get(
-        "https://services.sentinel-hub.com/aux/ratelimit/contract",
+        f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/contract",
         params={
             "userId": f"eq:{user_id}",
         },
@@ -64,7 +67,7 @@ def fetch_rate_limits(user_id, auth_token):
     contracts = r.json()["data"]
 
     r = requests.get(
-        f"https://services.sentinel-hub.com/aux/ratelimit/statistics/tokenCounts/{user_id}",
+        f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/statistics/tokenCounts/{user_id}",
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     r.raise_for_status()
@@ -112,6 +115,7 @@ def adjust_filling(nanos_between_refills):
 
 def redis_init_rate_limits(rate_limits):
     with rds.pipeline() as pipe:
+        pipe.delete(REDIS_REMAINING_KEY, REDIS_REFILLS_KEY, REDIS_TYPES_KEY)
         for policy in rate_limits:
             pipe.hset(REDIS_REMAINING_KEY, policy["id"], policy["initial"])
             pipe.hset(REDIS_REFILLS_KEY, policy["id"], policy["nanos_between_refills"])
@@ -143,7 +147,7 @@ def run_syncing(rate_limits):
     way. However the difference should be negligable and should not matter, because the process
     fixes itself in time if we have either too big or too small value in a bucket.
     """
-    s = sched.scheduler(time.time, time.sleep)
+    scheduler = sched.scheduler(time.time, time.sleep)
     PRIORITY = 1
 
     def fill_bucket(policy_id, fill_interval_s, fill_quantity, capacity, scheduled_at):
@@ -162,7 +166,7 @@ def run_syncing(rate_limits):
             capacity,
             scheduled_at + fill_interval_s,
         )
-        s.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
+        scheduler.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
 
     # initialize the scheduler:
     now = time.time()
@@ -180,8 +184,8 @@ def run_syncing(rate_limits):
             capacity,
             scheduled_at,
         )
-        s.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
-    s.run()
+        scheduler.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
+    scheduler.run()
 
 
 def main():
@@ -195,12 +199,21 @@ def main():
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
-    auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
-    user_id = extract_user_id(auth_token)
-    rate_limits = fetch_rate_limits(user_id, auth_token)
+    while True:
+        try:
+            auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+        except Exception as ex:
+            logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
+            time.sleep(5)
+            continue
 
-    redis_init_rate_limits(rate_limits)
-    run_syncing(rate_limits)
+        user_id = extract_user_id(auth_token)
+        rate_limits = fetch_rate_limits(user_id, auth_token)
+
+        redis_init_rate_limits(rate_limits)
+        run_syncing(rate_limits)
+
+        logging.info("Restarting...")
 
 
 if __name__ == "__main__":
