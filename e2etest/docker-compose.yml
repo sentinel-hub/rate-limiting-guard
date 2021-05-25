@@ -27,7 +27,6 @@ services:
     environment:
       CLIENT_ID: "FAKE_CLIENT_ID"
       CLIENT_SECRET: "FAKE_CLIENT_SECRET"
-      # SENTINELHUB_ROOT_URL: "http://127.0.0.1:8000"
       SENTINELHUB_ROOT_URL: "http://e2etest_mocksh:8000"
       REDIS_HOST: redis
       REDIS_PORT: 6379
