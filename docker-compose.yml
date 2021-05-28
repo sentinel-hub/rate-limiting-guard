@@ -19,6 +19,7 @@ services:
 
   syncer:
     image: sentinelhub/rate-limiting-guard
+    container_name: syncer
     build:
       context: ./syncer/
       dockerfile: Dockerfile

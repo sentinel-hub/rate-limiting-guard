@@ -23,6 +23,7 @@ POLICY_TYPES_SHORT_NAMES = {
     "REQUESTS": PolicyType.REQUESTS,
 }
 
+min_revisit_time_ms = None
 
 ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
 ZOOKEEPER_KEY_BASE = "/openeo/rlguard"
@@ -30,12 +31,15 @@ zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
 zk.start()
 repository = ZooKeeperRepository(zk, ZOOKEEPER_KEY_BASE)
 
+SENTINELHUB_ROOT_URL = os.environ.get("SENTINELHUB_ROOT_URL", "https://services.sentinel-hub.com")
+
+
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
 
 def request_auth_token(client_id, client_secret):
     r = requests.post(
-        "https://services.sentinel-hub.com/oauth/token",
+        f"{SENTINELHUB_ROOT_URL}/oauth/token",
         data={
             "grant_type": "client_credentials",
             "client_id": client_id,
@@ -54,7 +58,7 @@ def extract_user_id(auth_token):
 
 def fetch_rate_limits(user_id, auth_token):
     r = requests.get(
-        "https://services.sentinel-hub.com/aux/ratelimit/contract",
+        f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/contract",
         params={
             "userId": f"eq:{user_id}",
         },
@@ -64,7 +68,7 @@ def fetch_rate_limits(user_id, auth_token):
     contracts = r.json()["data"]
 
     r = requests.get(
-        f"https://services.sentinel-hub.com/aux/ratelimit/statistics/tokenCounts/{user_id}",
+        f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/statistics/tokenCounts/{user_id}",
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     r.raise_for_status()
@@ -110,13 +114,14 @@ def adjust_filling(nanos_between_refills):
     return fill_interval_s, n_at_once
 
 
-def repository_fill_bucket(field, incr_by, limit):
+def repository_fill_bucket(field, incr_by, limit, min_revisit_time_ms):
     """
-    Since we can't atomically check and increment conditionally, we increment, then
-    check the new value, and decrement back if over the limit.
+    Fills the rate-limiting bucket.
     """
     new_value = repository.increment_counter(field, float(incr_by))
 
+    # Since we can't atomically check and increment conditionally, we increment, then
+    # check the new value, and decrement back if over the limit.
     if int(new_value) > limit:
         decr_by = int(new_value) - limit
         final_value = repository.increment_counter(field, -float(decr_by))
@@ -124,8 +129,10 @@ def repository_fill_bucket(field, incr_by, limit):
     else:
         logging.debug(f"Filled {field} to {new_value} (limit {limit})")
 
+    repository.signal_syncer_alive(min_revisit_time_ms)
 
-def run_syncing(rate_limits):
+
+def run_syncing(rate_limits, min_revisit_time_ms):
     """
     Runs a scheduler which fills the rate limiting buckets in Redis.
 
@@ -135,7 +142,7 @@ def run_syncing(rate_limits):
     way. However the difference should be negligable and should not matter, because the process
     fixes itself in time if we have either too big or too small value in a bucket.
     """
-    s = sched.scheduler(time.time, time.sleep)
+    scheduler = sched.scheduler(time.time, time.sleep)
     PRIORITY = 1
 
     def fill_bucket(policy_id, fill_interval_s, fill_quantity, capacity, scheduled_at):
@@ -143,7 +150,7 @@ def run_syncing(rate_limits):
         logging.debug(
             f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at:.3f}, {now - scheduled_at:.3f}s late."
         )
-        repository_fill_bucket(policy_id, fill_quantity, capacity)
+        repository_fill_bucket(policy_id, fill_quantity, capacity, min_revisit_time_ms)
 
         # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
         adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
@@ -154,7 +161,7 @@ def run_syncing(rate_limits):
             capacity,
             scheduled_at + fill_interval_s,
         )
-        s.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
+        scheduler.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
 
     # initialize the scheduler:
     now = time.time()
@@ -172,8 +179,8 @@ def run_syncing(rate_limits):
             capacity,
             scheduled_at,
         )
-        s.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
-    s.run()
+        scheduler.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
+    scheduler.run()
 
 
 def main():
@@ -187,12 +194,25 @@ def main():
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
-    auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
-    user_id = extract_user_id(auth_token)
-    rate_limits = fetch_rate_limits(user_id, auth_token)
+    while True:
+        try:
+            auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+        except Exception as ex:
+            logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
+            time.sleep(5)
+            continue
 
-    repository.init_rate_limits(rate_limits)
-    run_syncing(rate_limits)
+        user_id = extract_user_id(auth_token)
+        rate_limits = fetch_rate_limits(user_id, auth_token)
+
+        # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
+        # key to twice the time we should refill the buckets in:
+        min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
+
+        repository.init_rate_limits(rate_limits, min_revisit_time_ms)
+        run_syncing(rate_limits, min_revisit_time_ms)
+
+        logging.info("Restarting...")
 
 
 if __name__ == "__main__":
