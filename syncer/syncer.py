@@ -3,13 +3,15 @@ import logging
 import math
 import os
 import sched
+import sys
 import time
 
 import jwt
 import requests
 
+from kazoo.client import KazooClient
 from rlguard import PolicyType
-from rlguard.repository import Repository, RedisRepository
+from rlguard.repository import Repository, RedisRepository, ZooKeeperRepository
 
 
 POLICY_TYPES_SHORT_NAMES = {
@@ -171,7 +173,7 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository):
     scheduler.run()
 
 
-def main():
+def main(argv):
     CLIENT_ID = os.environ.get("CLIENT_ID", "")
     CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
     # Docker-compose doesn't strip double quotes when reading from .env; however running this file from
@@ -182,35 +184,39 @@ def main():
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
-    REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-    REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-    rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+    if len(argv) > 1 and argv[1] == 'zookeeper':
+        ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
+        zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
+        zk.start()
 
-    try:
+        repository = ZooKeeperRepository(zk, key_base="/openeo/rlguard")
+    else:
+        REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+        REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+        rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
         repository = RedisRepository(rds)
 
-        while True:
-            try:
-                auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
-            except Exception as ex:
-                logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
-                time.sleep(5)
-                continue
+    while True:
+        try:
+            auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+        except Exception as ex:
+            logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
+            time.sleep(5)
+            continue
 
-            user_id = extract_user_id(auth_token)
-            rate_limits = fetch_rate_limits(user_id, auth_token)
+        user_id = extract_user_id(auth_token)
+        rate_limits = fetch_rate_limits(user_id, auth_token)
 
-            # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
-            # key to twice the time we should refill the buckets in:
-            min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
+        # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
+        # key to twice the time we should refill the buckets in:
+        min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
 
-            repository.init_rate_limits(rate_limits, min_revisit_time_ms)
-            run_syncing(rate_limits, min_revisit_time_ms, repository)
+        repository.init_rate_limits(rate_limits, min_revisit_time_ms)
+        run_syncing(rate_limits, min_revisit_time_ms, repository)
 
-            logging.info("Restarting...")
-    finally:
-        rds.close()
+        logging.info("Restarting...")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv)
