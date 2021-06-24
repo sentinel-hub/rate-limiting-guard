@@ -1,16 +1,7 @@
 from enum import Enum
-import json
-from kazoo.client import KazooClient
 import logging
-import os
 
-from .repository import ZooKeeperRepository
-
-ZOOKEEPER_KEY_BASE = "/openeo/rlguard"
-ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
-zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
-zk.start()
-repository = ZooKeeperRepository(zk, ZOOKEEPER_KEY_BASE)
+from .repository import Repository
 
 
 class SyncerDownException(Exception):
@@ -75,7 +66,7 @@ def calculate_processing_units(
     return pu
 
 
-def apply_for_request(processing_units: float) -> float:
+def apply_for_request(processing_units: float, repository: Repository) -> float:
     """
     Decrements & fetches the Redis counters, calculates the delay and returns it.
 

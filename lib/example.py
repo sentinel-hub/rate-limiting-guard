@@ -5,8 +5,10 @@ import time
 
 import requests
 import requests.exceptions
+from kazoo.client import KazooClient
 
 from rlguard import calculate_processing_units, OutputFormat, apply_for_request, SyncerDownException
+from rlguard.repository import Repository, ZooKeeperRepository
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
@@ -32,7 +34,7 @@ def request_auth_token(client_id, client_secret):
     return j["access_token"]
 
 
-def get_map(auth_token, output_filename=None):
+def get_map(auth_token, repository: Repository, output_filename=None):
     """
     This example shows how to download satellite imagery from Sentinel Hub using the Rate Limiting Guard
     for protection against rate limiting responses (429).
@@ -42,7 +44,7 @@ def get_map(auth_token, output_filename=None):
 
     # now apply for permission to make a request:
     try:
-        delay = apply_for_request(pu)
+        delay = apply_for_request(pu, repository)
     except SyncerDownException:
         delay = 0
         # If this happens, retries should be handled manually, with exponential backoff (but limited to the
@@ -107,27 +109,39 @@ def main():
     CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
-    auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
 
-    # if the request fails for any reason, we should retry it a few times:
-    N_TRIES = 5
-    for iteration in range(N_TRIES):
-        try:
-            get_map(auth_token, "output.png")
-            break  # request succeeded, no need to retry it
-        except requests.exceptions.HTTPError:
-            # there was an error - perform exponential backoff
-            # we apply some jitter to avoid all workers hitting the same time again:
-            jitter = 0.75 + (0.5 * random.random())  # 25% jitter - 0.75 - 1.25
-            retry_timeout = (2 ** iteration) * jitter
-            if iteration < N_TRIES - 1:
-                logging.warning(
-                    f"There was an error fetching data (iteration {iteration}), retrying in {retry_timeout} seconds..."
-                )
-                time.sleep(retry_timeout)
-            else:
-                logging.error(f"Request failed {N_TRIES} times, failing... sorry.")
-                raise
+    # TODO: replace with Redis repo
+    ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
+    zk = KazooClient(ZOOKEEPER_HOSTS)
+    zk.start()
+
+    try:
+        repository = ZooKeeperRepository(zk, key_base="/openeo/rlguard")
+
+        auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+
+        # if the request fails for any reason, we should retry it a few times:
+        N_TRIES = 5
+        for iteration in range(N_TRIES):
+            try:
+                get_map(auth_token, repository, "output.png")
+                break  # request succeeded, no need to retry it
+            except requests.exceptions.HTTPError:
+                # there was an error - perform exponential backoff
+                # we apply some jitter to avoid all workers hitting the same time again:
+                jitter = 0.75 + (0.5 * random.random())  # 25% jitter - 0.75 - 1.25
+                retry_timeout = (2 ** iteration) * jitter
+                if iteration < N_TRIES - 1:
+                    logging.warning(
+                        f"There was an error fetching data (iteration {iteration}), retrying in {retry_timeout} seconds..."
+                    )
+                    time.sleep(retry_timeout)
+                else:
+                    logging.error(f"Request failed {N_TRIES} times, failing... sorry.")
+                    raise
+    finally:
+        zk.stop()
+        zk.close()
 
 
 if __name__ == "__main__":
