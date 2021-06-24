@@ -21,8 +21,8 @@ services:
     image: sentinelhub/rate-limiting-guard
     container_name: syncer
     build:
-      context: ./syncer/
-      dockerfile: Dockerfile
+      context: ./
+      dockerfile: syncer/Dockerfile
     depends_on:
       zookeeper:
         condition: service_healthy

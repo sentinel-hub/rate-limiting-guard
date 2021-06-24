@@ -1,5 +1,3 @@
-from enum import Enum
-import json
 from kazoo.client import KazooClient
 import logging
 import math
@@ -10,12 +8,8 @@ import time
 import jwt
 import requests
 
-from lib.repository import ZooKeeperRepository
-
-
-class PolicyType(Enum):
-    PROCESSING_UNITS = "PU"
-    REQUESTS = "RQ"
+from rlguard import PolicyType
+from rlguard.repository import Repository, ZooKeeperRepository
 
 
 POLICY_TYPES_SHORT_NAMES = {
@@ -24,12 +18,6 @@ POLICY_TYPES_SHORT_NAMES = {
 }
 
 min_revisit_time_ms = None
-
-ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
-ZOOKEEPER_KEY_BASE = "/openeo/rlguard"
-zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
-zk.start()
-repository = ZooKeeperRepository(zk, ZOOKEEPER_KEY_BASE)
 
 SENTINELHUB_ROOT_URL = os.environ.get("SENTINELHUB_ROOT_URL", "https://services.sentinel-hub.com")
 
@@ -114,7 +102,7 @@ def adjust_filling(nanos_between_refills):
     return fill_interval_s, n_at_once
 
 
-def repository_fill_bucket(field, incr_by, limit, min_revisit_time_ms):
+def repository_fill_bucket(field, incr_by, limit, min_revisit_time_ms, repository: Repository):
     """
     Fills the rate-limiting bucket.
     """
@@ -132,7 +120,7 @@ def repository_fill_bucket(field, incr_by, limit, min_revisit_time_ms):
     repository.signal_syncer_alive(min_revisit_time_ms)
 
 
-def run_syncing(rate_limits, min_revisit_time_ms):
+def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository):
     """
     Runs a scheduler which fills the rate limiting buckets in Redis.
 
@@ -150,7 +138,7 @@ def run_syncing(rate_limits, min_revisit_time_ms):
         logging.debug(
             f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at:.3f}, {now - scheduled_at:.3f}s late."
         )
-        repository_fill_bucket(policy_id, fill_quantity, capacity, min_revisit_time_ms)
+        repository_fill_bucket(policy_id, fill_quantity, capacity, min_revisit_time_ms, repository)
 
         # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
         adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
@@ -194,25 +182,36 @@ def main():
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
-    while True:
-        try:
-            auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
-        except Exception as ex:
-            logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
-            time.sleep(5)
-            continue
+    # TODO: make repo type configurable
+    ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
+    zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
+    zk.start()
 
-        user_id = extract_user_id(auth_token)
-        rate_limits = fetch_rate_limits(user_id, auth_token)
+    try:
+        repository = ZooKeeperRepository(zk, key_base="/openeo/rlguard")
 
-        # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
-        # key to twice the time we should refill the buckets in:
-        min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
+        while True:
+            try:
+                auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+            except Exception as ex:
+                logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
+                time.sleep(5)
+                continue
 
-        repository.init_rate_limits(rate_limits, min_revisit_time_ms)
-        run_syncing(rate_limits, min_revisit_time_ms)
+            user_id = extract_user_id(auth_token)
+            rate_limits = fetch_rate_limits(user_id, auth_token)
 
-        logging.info("Restarting...")
+            # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
+            # key to twice the time we should refill the buckets in:
+            min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
+
+            repository.init_rate_limits(rate_limits, min_revisit_time_ms)
+            run_syncing(rate_limits, min_revisit_time_ms, repository)
+
+            logging.info("Restarting...")
+    finally:
+        zk.stop()
+        zk.close()
 
 
 if __name__ == "__main__":
