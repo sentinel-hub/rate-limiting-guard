@@ -6,6 +6,7 @@ from typing import List
 from kazoo.client import KazooClient
 from kazoo.exceptions import NoNodeError
 from kazoo.recipe.counter import Counter
+from redis import Redis
 
 
 class Repository(ABC):
@@ -34,13 +35,48 @@ class Repository(ABC):
         pass
 
 
-class RedisRepository:
-    # FIXME: implement
-    pass
+class RedisRepository(Repository):
+    def __init__(self, rds: Redis):
+        super().__init__()
+
+        self._rds = rds
+        self._remaining_key = b"remaining"
+        self._refills_key = b"refill_ns"
+        self._types_key = b"types"
+        self._alive_key = b"syncer_alive"
+        self._alive_value = b"1"
+
+    def init_rate_limits(self, rate_limits: List[dict], expires_within_ms: int):
+        with self._rds.pipeline() as pipe:
+            pipe.delete(self._remaining_key, self._refills_key, self._types_key)
+            for policy in rate_limits:
+                pipe.hset(self._remaining_key, policy["id"], policy["initial"])
+                pipe.hset(self._refills_key, policy["id"], policy["nanos_between_refills"])
+                pipe.hset(self._types_key, policy["id"], policy["type"])
+
+            pipe.set(self._alive_key, self._alive_value, px=expires_within_ms)
+            pipe.execute()
+
+    def increment_counter(self, policy_id: str, amount: float) -> float:
+        return self._rds.hincrbyfloat(self._remaining_key, policy_id, amount)
+
+    def get_policy_types(self) -> dict:
+        return self._rds.hgetall(self._types_key)
+
+    def get_policy_refills(self) -> dict:
+        return self._rds.hgetall(self._refills_key)
+
+    def is_syncer_alive(self) -> bool:
+        return self._rds.get(self._alive_key)
+
+    def signal_syncer_alive(self, expires_within_ms: int):
+        self._rds.set(self._alive_key, self._alive_value, px=expires_within_ms)
 
 
 class ZooKeeperRepository(Repository):
     def __init__(self, client: KazooClient, key_base: str):
+        super().__init__()
+
         self._client = client
         self._remaining_key = f"{key_base}/remaining"
         self._refills_key = f"{key_base}/refill_ns"

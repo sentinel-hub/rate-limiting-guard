@@ -3,12 +3,12 @@ import os
 import random
 import time
 
+import redis
 import requests
 import requests.exceptions
-from kazoo.client import KazooClient
 
 from rlguard import calculate_processing_units, OutputFormat, apply_for_request, SyncerDownException
-from rlguard.repository import Repository, ZooKeeperRepository
+from rlguard.repository import Repository, RedisRepository
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
@@ -110,13 +110,12 @@ def main():
     if not CLIENT_ID or not CLIENT_SECRET:
         raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
-    # TODO: replace with Redis repo
-    ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
-    zk = KazooClient(ZOOKEEPER_HOSTS)
-    zk.start()
+    REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+    REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+    rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
 
     try:
-        repository = ZooKeeperRepository(zk, key_base="/openeo/rlguard")
+        repository = RedisRepository(rds)
 
         auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
 
@@ -140,8 +139,7 @@ def main():
                     logging.error(f"Request failed {N_TRIES} times, failing... sorry.")
                     raise
     finally:
-        zk.stop()
-        zk.close()
+        rds.close()
 
 
 if __name__ == "__main__":
