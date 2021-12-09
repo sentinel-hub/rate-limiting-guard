@@ -26,5 +26,6 @@ services:
     environment:
       CLIENT_ID: "${CLIENT_ID}"
       CLIENT_SECRET: "${CLIENT_SECRET}"
+      REFRESH_BUCKETS_SEC: "${REFRESH_BUCKETS_SEC}"
       REDIS_HOST: redis
       REDIS_PORT: 6379
