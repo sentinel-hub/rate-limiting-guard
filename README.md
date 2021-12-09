@@ -106,6 +106,11 @@ $ docker-compose build
 $ docker-compose up -d
 ```
 
+With time, the values in the buckets might drift away from the actual values on Sentinel Hub. `RLGuard` can automatically refresh the values in the buckets, just edit the `.env` file and set:
+```
+REFRESH_BUCKETS_SEC=<refreshing interval in seconds>
+```
+
 ### RLGuard library
 
 The purpose of `RLGuard` library is to make applying for a permission to make a request to Sentinel Hub a bit easier. It provides two functions:
