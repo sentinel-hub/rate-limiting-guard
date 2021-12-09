@@ -212,8 +212,6 @@ def run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=None, auth
         except Exception as ex:
             logging.warning(f"Refreshing buckets failed! {str(ex)}")
 
-        now = time.time()
-
         for policy in rate_limits:
             bucket_value = float(rds.hget(REDIS_REMAINING_KEY, policy["id"]))
             actual_value = stats[POLICY_TYPES_FULL_NAMES[policy["type"]]][policy["sampling_period"]]
@@ -254,7 +252,11 @@ def run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=None, auth
 
 
 def main():
-    REFRESH_BUCKETS_SEC = int(os.environ.get("REFRESH_BUCKETS_SEC", 500))
+    REFRESH_BUCKETS_SEC = os.environ.get("REFRESH_BUCKETS_SEC")
+    if REFRESH_BUCKETS_SEC:
+        REFRESH_BUCKETS_SEC = int(REFRESH_BUCKETS_SEC)
+    else:
+        REFRESH_BUCKETS_SEC = None
 
     while True:
         try:
