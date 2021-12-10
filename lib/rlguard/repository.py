@@ -27,6 +27,10 @@ class Repository(ABC):
         pass
 
     @abstractmethod
+    def get_buckets_state(self) -> dict:
+        pass
+
+    @abstractmethod
     def is_syncer_alive(self) -> bool:
         pass
 
@@ -66,6 +70,9 @@ class RedisRepository(Repository):
     def get_policy_refills(self) -> dict:
         return self._rds.hgetall(self._refills_key)
 
+    def get_buckets_state(self) -> dict:
+        return self._rds.hgetall(self._remaining_key)
+
     def is_syncer_alive(self) -> bool:
         return self._rds.get(self._alive_key)
 
@@ -95,7 +102,7 @@ class ZooKeeperRepository(Repository):
             policy_refills[policy["id"]] = policy["nanos_between_refills"]
             policy_types[policy["id"]] = policy["type"]
 
-            policy_remaining = self._counter(policy['id'])
+            policy_remaining = self._counter(policy["id"])
             try:
                 self._client.delete(policy_remaining.path)
             except NoNodeError:
@@ -121,6 +128,9 @@ class ZooKeeperRepository(Repository):
 
     def get_policy_refills(self) -> dict:
         return self._get_object(self._refills_key)
+
+    def get_buckets_state(self) -> dict:
+        return self._get_object(self._remaining_key)
 
     def _get_object(self, key: str) -> dict:
         data, _ = self._client.get(key)

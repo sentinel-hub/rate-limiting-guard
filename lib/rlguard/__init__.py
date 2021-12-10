@@ -91,8 +91,7 @@ def apply_for_request(processing_units: float, repository: Repository) -> float:
     new_remaining = []
     for policy_id, policy_type in buckets_types_items:
         new_value = repository.increment_counter(
-            policy_id,
-            -float(processing_units) if policy_type == PolicyType.PROCESSING_UNITS.value else -1.0
+            policy_id, -float(processing_units) if policy_type == PolicyType.PROCESSING_UNITS.value else -1.0
         )
 
         new_remaining.append(new_value)

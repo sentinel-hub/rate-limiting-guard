@@ -18,10 +18,24 @@ POLICY_TYPES_SHORT_NAMES = {
     "PROCESSING_UNITS": PolicyType.PROCESSING_UNITS,
     "REQUESTS": PolicyType.REQUESTS,
 }
+POLICY_TYPES_FULL_NAMES = {
+    PolicyType.PROCESSING_UNITS.value: "PROCESSING_UNITS",
+    PolicyType.REQUESTS.value: "REQUESTS",
+}
 
 min_revisit_time_ms = None
 
 SENTINELHUB_ROOT_URL = os.environ.get("SENTINELHUB_ROOT_URL", "https://services.sentinel-hub.com")
+
+CLIENT_ID = os.environ.get("CLIENT_ID")
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+# Docker-compose doesn't strip double quotes when reading from .env; however running this file from
+# command line decodes the secret incorrectly if the quotes are absent. To avoid having two different
+# ways of writing .env files, we remove the quotes here if present:
+if CLIENT_SECRET.startswith('"') and CLIENT_SECRET.endswith('"'):
+    CLIENT_SECRET = CLIENT_SECRET[1:-1]
+if not CLIENT_ID or not CLIENT_SECRET:
+    raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
@@ -46,6 +60,21 @@ def extract_user_id(auth_token):
     return data["sub"]
 
 
+def will_auth_token_soon_expire(auth_token, exp_margin_s=300):
+    data = jwt.decode(auth_token, options={"verify_signature": False})
+    return data["exp"] <= time.time() + exp_margin_s
+
+
+def fetch_current_stats(auth_token, user_id):
+    r = requests.get(
+        f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/statistics/tokenCounts/{user_id}",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    r.raise_for_status()
+    stats = r.json()["data"]
+    return stats
+
+
 def fetch_rate_limits(user_id, auth_token):
     r = requests.get(
         f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/contract",
@@ -57,12 +86,7 @@ def fetch_rate_limits(user_id, auth_token):
     r.raise_for_status()
     contracts = r.json()["data"]
 
-    r = requests.get(
-        f"{SENTINELHUB_ROOT_URL}/aux/ratelimit/statistics/tokenCounts/{user_id}",
-        headers={"Authorization": f"Bearer {auth_token}"},
-    )
-    r.raise_for_status()
-    stats = r.json()["data"]
+    stats = fetch_current_stats(auth_token, user_id)
 
     rate_limits = []
     for contract in contracts:
@@ -84,6 +108,7 @@ def fetch_rate_limits(user_id, auth_token):
                     "fill_interval_s": fill_interval_s,
                     "fill_quantity": fill_quantity,
                     "nanos_between_refills": int(policy["nanosBetweenRefills"]),
+                    "sampling_period": policy["samplingPeriod"],
                 }
             )
     return rate_limits
@@ -122,7 +147,7 @@ def repository_fill_bucket(field, incr_by, limit, min_revisit_time_ms, repositor
     repository.signal_syncer_alive(min_revisit_time_ms)
 
 
-def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository):
+def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository, refresh_buckets_sec=None, auth_token=None):
     """
     Runs a scheduler which fills the rate limiting buckets in Redis.
 
@@ -134,6 +159,7 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository):
     """
     scheduler = sched.scheduler(time.time, time.sleep)
     PRIORITY = 1
+    PRIORITY_REFRESH_BUCKETS = 2
 
     def fill_bucket(policy_id, fill_interval_s, fill_quantity, capacity, scheduled_at):
         now = time.time()
@@ -153,6 +179,30 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository):
         )
         scheduler.enter(adjusted_interval_s, PRIORITY, fill_bucket, argument=arguments)
 
+    def refresh_buckets(rate_limits, auth_token):
+        try:
+            if auth_token is None or will_auth_token_soon_expire(auth_token):
+                auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+
+            user_id = extract_user_id(auth_token)
+            stats = fetch_current_stats(auth_token, user_id)
+        except Exception as ex:
+            logging.warning(f"Refreshing buckets failed! {str(ex)}")
+
+        bucket_values = repository.get_buckets_state()
+
+        for policy in rate_limits:
+            bucket_value = float(bucket_values[policy["id"]])
+            actual_value = stats[POLICY_TYPES_FULL_NAMES[policy["type"]]][policy["sampling_period"]]
+            incr_by = actual_value - bucket_value
+            repository_fill_bucket(policy["id"], incr_by, policy["capacity"], min_revisit_time_ms, repository)
+            logging.debug(
+                f"Refreshed policy type {POLICY_TYPES_FULL_NAMES[policy['type']]} {policy['sampling_period']}. Bucket value: {bucket_value}. Actual value: {actual_value}"
+            )
+        scheduler.enter(
+            refresh_buckets_sec, PRIORITY_REFRESH_BUCKETS, refresh_buckets, argument=(rate_limits, auth_token)
+        )
+
     # initialize the scheduler:
     now = time.time()
     for policy in rate_limits:
@@ -170,21 +220,18 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository):
             scheduled_at,
         )
         scheduler.enter(fill_interval_s, PRIORITY, fill_bucket, argument=arguments)
+
+    if refresh_buckets_sec is not None:
+        # Schedule refreshing buckets with values from sentinel hub
+        arguments = (rate_limits, auth_token)
+        scheduler.enter(refresh_buckets_sec, PRIORITY_REFRESH_BUCKETS, refresh_buckets, argument=arguments)
+        logging.info(f"Refreshing buckets every {refresh_buckets_sec} seconds.")
+
     scheduler.run()
 
 
 def main(argv):
-    CLIENT_ID = os.environ.get("CLIENT_ID", "")
-    CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
-    # Docker-compose doesn't strip double quotes when reading from .env; however running this file from
-    # command line decodes the secret incorrectly if the quotes are absent. To avoid having two different
-    # ways of writing .env files, we remove the quotes here if present:
-    if CLIENT_SECRET.startswith('"') and CLIENT_SECRET.endswith('"'):
-        CLIENT_SECRET = CLIENT_SECRET[1:-1]
-    if not CLIENT_ID or not CLIENT_SECRET:
-        raise Exception("Please supply CLIENT_ID and CLIENT_SECRET env vars!")
-
-    if len(argv) > 1 and argv[1] == 'zookeeper':
+    if len(argv) > 1 and argv[1] == "zookeeper":
         ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
         zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
         zk.start()
@@ -193,9 +240,15 @@ def main(argv):
     else:
         REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
         REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-        rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+        rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
         repository = RedisRepository(rds)
+
+    REFRESH_BUCKETS_SEC = os.environ.get("REFRESH_BUCKETS_SEC")
+    if REFRESH_BUCKETS_SEC:
+        REFRESH_BUCKETS_SEC = int(REFRESH_BUCKETS_SEC)
+    else:
+        REFRESH_BUCKETS_SEC = None
 
     while True:
         try:
@@ -213,7 +266,9 @@ def main(argv):
         min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
 
         repository.init_rate_limits(rate_limits, min_revisit_time_ms)
-        run_syncing(rate_limits, min_revisit_time_ms, repository)
+        run_syncing(
+            rate_limits, min_revisit_time_ms, repository, refresh_buckets_sec=REFRESH_BUCKETS_SEC, auth_token=auth_token
+        )
 
         logging.info("Restarting...")
 
