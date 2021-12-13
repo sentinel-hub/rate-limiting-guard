@@ -130,7 +130,7 @@ class ZooKeeperRepository(Repository):
         return self._get_object(self._refills_key)
 
     def get_buckets_state(self) -> dict:
-        return self._get_object(self._remaining_key)
+        return {policy_id: self._counter(policy_id).value for policy_id, _ in self.get_policy_types().items()}
 
     def _get_object(self, key: str) -> dict:
         data, _ = self._client.get(key)
