@@ -137,14 +137,16 @@ class ZooKeeperRepository(Repository):
         return json.loads(data.decode())
 
     def signal_syncer_alive(self, expires_within_ms: int):
-        expires_at_ms = ZooKeeperRepository._now_ms() + expires_within_ms
+        expires_at_ms = self._now_ms() + expires_within_ms
         self._client.set(self._alive_key, repr(expires_at_ms).encode())
 
     def is_syncer_alive(self) -> bool:
+        now_ms = self._now_ms()
+
         data, _ = self._client.get(self._alive_key)
         expires_at_ms = int(data.decode())
 
-        return ZooKeeperRepository._now_ms() <= expires_at_ms
+        return now_ms <= expires_at_ms
 
     @staticmethod
     def _now_ms():
