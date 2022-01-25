@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import List
@@ -7,6 +8,8 @@ from kazoo.client import KazooClient
 from kazoo.exceptions import NoNodeError
 from kazoo.recipe.counter import Counter
 from redis import Redis
+
+logger = logging.getLogger(__name__)
 
 
 class Repository(ABC):
@@ -146,7 +149,12 @@ class ZooKeeperRepository(Repository):
         data, _ = self._client.get(self._alive_key)
         expires_at_ms = int(data.decode())
 
-        return now_ms <= expires_at_ms
+        alive = now_ms <= expires_at_ms
+
+        if not alive:
+            logger.debug(f"{now_ms}: syncer expired at {expires_at_ms}")
+
+        return alive
 
     @staticmethod
     def _now_ms():
