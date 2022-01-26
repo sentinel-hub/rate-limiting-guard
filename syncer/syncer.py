@@ -231,9 +231,7 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository, refres
 
 
 def main(argv):
-    zookeeper = len(argv) > 1 and argv[1] == "zookeeper"
-
-    if zookeeper:
+    if len(argv) > 1 and argv[1] == "zookeeper":
         ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
         zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
         zk.start()
@@ -252,6 +250,12 @@ def main(argv):
     else:
         REFRESH_BUCKETS_SEC = None
 
+    REVISIT_TIME_MSEC = os.environ.get("REVISIT_TIME_MSEC")
+    if REVISIT_TIME_MSEC:
+        REVISIT_TIME_MSEC = int(REVISIT_TIME_MSEC)
+    else:
+        REVISIT_TIME_MSEC = None
+
     while True:
         try:
             auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
@@ -265,10 +269,7 @@ def main(argv):
 
         # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
         # key to twice the time we should refill the buckets in:
-        min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
-
-        if zookeeper:
-            min_revisit_time_ms = max(min_revisit_time_ms, 5000)
+        min_revisit_time_ms = REVISIT_TIME_MSEC or int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
 
         repository.init_rate_limits(rate_limits, min_revisit_time_ms)
         run_syncing(
