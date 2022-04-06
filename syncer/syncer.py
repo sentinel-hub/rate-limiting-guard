@@ -61,8 +61,12 @@ def extract_user_id(auth_token):
 
 
 def will_auth_token_soon_expire(auth_token, exp_margin_s=300):
+    return extract_expiration_time(auth_token) <= time.time() + exp_margin_s
+
+
+def extract_expiration_time(auth_token):
     data = jwt.decode(auth_token, options={"verify_signature": False})
-    return data["exp"] <= time.time() + exp_margin_s
+    return data["exp"]
 
 
 def fetch_current_stats(auth_token, user_id):
@@ -183,6 +187,8 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository, refres
         try:
             if auth_token is None or will_auth_token_soon_expire(auth_token):
                 auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+                exp_time_s = extract_expiration_time(auth_token)
+                repository.save_access_token(auth_token, exp_time_s)
 
             user_id = extract_user_id(auth_token)
             stats = fetch_current_stats(auth_token, user_id)
@@ -266,12 +272,15 @@ def main(argv):
 
         user_id = extract_user_id(auth_token)
         rate_limits = fetch_rate_limits(user_id, auth_token)
+        exp_time_s = extract_expiration_time(auth_token)
 
         # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
         # key to twice the time we should refill the buckets in:
         min_revisit_time_ms = REVISIT_TIME_MSEC or int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
 
         repository.init_rate_limits(rate_limits, min_revisit_time_ms)
+        repository.save_access_token(auth_token, exp_time_s)
+
         run_syncing(
             rate_limits, min_revisit_time_ms, repository, refresh_buckets_sec=REFRESH_BUCKETS_SEC, auth_token=auth_token
         )

@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from kazoo.client import KazooClient
 from kazoo.exceptions import NoNodeError
@@ -39,6 +39,14 @@ class Repository(ABC):
 
     @abstractmethod
     def signal_syncer_alive(self, expires_within_ms: int):
+        pass
+
+    @abstractmethod
+    def get_access_token(self) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    def save_access_token(self, token: str, expires_at_s: int):
         pass
 
 
@@ -82,6 +90,12 @@ class RedisRepository(Repository):
     def signal_syncer_alive(self, expires_within_ms: int):
         self._rds.set(self._alive_key, self._alive_value, px=expires_within_ms)
 
+    def get_access_token(self) -> Optional[dict]:
+        return None
+
+    def save_access_token(self, token: str, expires_at_s: int):
+        pass
+
 
 class ZooKeeperRepository(Repository):
     def __init__(self, client: KazooClient, key_base: str):
@@ -92,6 +106,7 @@ class ZooKeeperRepository(Repository):
         self._refills_key = f"{key_base}/refill_ns"
         self._types_key = f"{key_base}/types"
         self._alive_key = f"{key_base}/syncer_alive"
+        self._access_token_key = f"{key_base}/access_token"
 
     def _counter(self, policy_id: str) -> Counter:
         return self._client.Counter(f"{self._remaining_key}/{policy_id}", default=0.0)
@@ -159,3 +174,19 @@ class ZooKeeperRepository(Repository):
     @staticmethod
     def _now_ms():
         return int(time.time() * 1000)
+
+    def get_access_token(self) -> Optional[dict]:
+        try:
+            return self._get_object(self._access_token_key)
+        except NoNodeError:
+            logger.warning(f"no access token at {self._access_token_key}", exc_info=True)
+            return None
+
+    def save_access_token(self, token: str, expires_at_s: int):
+        access_token = {
+            "token": token,
+            "expires_at": expires_at_s * 1000
+        }
+
+        self._client.ensure_path(self._access_token_key)
+        self._client.set(self._access_token_key, json.dumps(access_token).encode())
