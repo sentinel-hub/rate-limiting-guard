@@ -9,6 +9,7 @@ import time
 import jwt
 import requests
 
+import kazoo.client
 from kazoo.client import KazooClient
 from rlguard import PolicyType
 from rlguard.repository import Repository, RedisRepository, ZooKeeperRepository
@@ -39,6 +40,7 @@ if not CLIENT_ID or not CLIENT_SECRET:
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
+kazoo.client.log.setLevel(logging.WARNING)
 
 
 def request_auth_token(client_id, client_secret):
