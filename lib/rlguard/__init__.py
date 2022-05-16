@@ -1,21 +1,7 @@
 from enum import Enum
 import logging
-import os
-from typing import Optional
 
-import redis
-
-
-REDIS_REMAINING_KEY = b"remaining"
-REDIS_REFILLS_KEY = b"refill_ns"
-REDIS_TYPES_KEY = b"types"
-REDIS_SYNCER_ALIVE_KEY = b"syncer_alive"
-REDIS_SYNCER_ALIVE_VALUE = b"1"
-
-
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+from .repository import Repository
 
 
 class SyncerDownException(Exception):
@@ -80,7 +66,7 @@ def calculate_processing_units(
     return pu
 
 
-def apply_for_request(processing_units: float) -> float:
+def apply_for_request(processing_units: float, repository: Repository) -> float:
     """
     Decrements & fetches the Redis counters, calculates the delay and returns it.
 
@@ -90,29 +76,26 @@ def apply_for_request(processing_units: float) -> float:
     offending bucket to refill itself from 0 to full).
     """
     # figure out the types of the buckets so we know how much to decrement them:
-    with rds.pipeline() as pipe:
-        pipe.hgetall(REDIS_TYPES_KEY)
-        pipe.hgetall(REDIS_REFILLS_KEY)
-        pipe.get(REDIS_SYNCER_ALIVE_KEY)
-        policy_types, policy_refills, syncer_alive = pipe.execute()
+    policy_refills = repository.get_policy_refills()
+    policy_types = repository.get_policy_types()
+    syncer_alive = repository.is_syncer_alive()
 
     logging.debug(f"Policy types: {policy_types}")
     logging.debug(f"Policy bucket refills: {policy_refills}ns")
 
-    if syncer_alive != REDIS_SYNCER_ALIVE_VALUE:
+    if not syncer_alive:
         raise SyncerDownException("Syncer service is down - revert to manual retries.")
 
     # decrement buckets according to their type:
-    with rds.pipeline() as pipe:
-        buckets_types_items = policy_types.items()
-        for policy_id, policy_type in buckets_types_items:
-            pipe.hincrbyfloat(
-                REDIS_REMAINING_KEY,
-                policy_id,
-                -processing_units if policy_type.decode() == PolicyType.PROCESSING_UNITS.value else -1,
-            )
-        new_remaining = pipe.execute()
-        new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
+    buckets_types_items = policy_types.items()
+    new_remaining = []
+    for policy_id, policy_type in buckets_types_items:
+        new_value = repository.increment_counter(
+            policy_id, -float(processing_units) if policy_type == PolicyType.PROCESSING_UNITS.value else -1.0
+        )
+
+        new_remaining.append(new_value)
+    new_remaining = dict(zip([policy_id for policy_id, _ in buckets_types_items], new_remaining))
 
     logging.debug(f"Bucket values after decrementing them: {new_remaining}")
     wait_times_ns = [-new_remaining[policy_id] * float(policy_refills[policy_id]) for policy_id in new_remaining.keys()]

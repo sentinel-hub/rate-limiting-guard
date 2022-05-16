@@ -1,19 +1,18 @@
-from enum import Enum
-import json
+import redis
 import logging
 import math
 import os
 import sched
+import sys
 import time
 
 import jwt
-import redis
 import requests
 
-
-class PolicyType(Enum):
-    PROCESSING_UNITS = "PU"
-    REQUESTS = "RQ"
+import kazoo.client
+from kazoo.client import KazooClient
+from rlguard import PolicyType
+from rlguard.repository import Repository, RedisRepository, ZooKeeperRepository
 
 
 POLICY_TYPES_SHORT_NAMES = {
@@ -24,18 +23,8 @@ POLICY_TYPES_FULL_NAMES = {
     PolicyType.PROCESSING_UNITS.value: "PROCESSING_UNITS",
     PolicyType.REQUESTS.value: "REQUESTS",
 }
-REDIS_REMAINING_KEY = b"remaining"
-REDIS_REFILLS_KEY = b"refill_ns"
-REDIS_TYPES_KEY = b"types"
-REDIS_SYNCER_ALIVE_KEY = b"syncer_alive"
-REDIS_SYNCER_ALIVE_VALUE = b"1"
 
 min_revisit_time_ms = None
-
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
-
 
 SENTINELHUB_ROOT_URL = os.environ.get("SENTINELHUB_ROOT_URL", "https://services.sentinel-hub.com")
 
@@ -51,6 +40,7 @@ if not CLIENT_ID or not CLIENT_SECRET:
 
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
+kazoo.client.log.setLevel(logging.WARNING)
 
 
 def request_auth_token(client_id, client_secret):
@@ -73,8 +63,12 @@ def extract_user_id(auth_token):
 
 
 def will_auth_token_soon_expire(auth_token, exp_margin_s=300):
+    return extract_expiration_time(auth_token) <= time.time() + exp_margin_s
+
+
+def extract_expiration_time(auth_token):
     data = jwt.decode(auth_token, options={"verify_signature": False})
-    return data["exp"] <= time.time() + exp_margin_s
+    return data["exp"]
 
 
 def fetch_current_stats(auth_token, user_id):
@@ -141,36 +135,25 @@ def adjust_filling(nanos_between_refills):
     return fill_interval_s, n_at_once
 
 
-def redis_init_rate_limits(rate_limits, min_revisit_time_ms):
-    with rds.pipeline() as pipe:
-        pipe.delete(REDIS_REMAINING_KEY, REDIS_REFILLS_KEY, REDIS_TYPES_KEY)
-        for policy in rate_limits:
-            pipe.hset(REDIS_REMAINING_KEY, policy["id"], policy["initial"])
-            pipe.hset(REDIS_REFILLS_KEY, policy["id"], policy["nanos_between_refills"])
-            pipe.hset(REDIS_TYPES_KEY, policy["id"], policy["type"])
-
-        pipe.set(REDIS_SYNCER_ALIVE_KEY, REDIS_SYNCER_ALIVE_VALUE, px=min_revisit_time_ms)
-        pipe.execute()
-
-
-def redis_fill_bucket(field, incr_by, limit, min_revisit_time_ms):
+def repository_fill_bucket(field, incr_by, limit, min_revisit_time_ms, repository: Repository):
     """
     Fills the rate-limiting bucket.
     """
+    new_value = repository.increment_counter(field, float(incr_by))
+
     # Since we can't atomically check and increment conditionally, we increment, then
     # check the new value, and decrement back if over the limit.
-    new_value = rds.hincrbyfloat(REDIS_REMAINING_KEY, field, incr_by)
     if int(new_value) > limit:
         decr_by = int(new_value) - limit
-        final_value = rds.hincrbyfloat(REDIS_REMAINING_KEY, field, -decr_by)
+        final_value = repository.increment_counter(field, -float(decr_by))
         logging.debug(f"Filled {field} to {final_value} (limit {limit} reached)")
     else:
         logging.debug(f"Filled {field} to {new_value} (limit {limit})")
 
-    rds.set(REDIS_SYNCER_ALIVE_KEY, REDIS_SYNCER_ALIVE_VALUE, px=min_revisit_time_ms)
+    repository.signal_syncer_alive(min_revisit_time_ms)
 
 
-def run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=None, auth_token=None):
+def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository, refresh_buckets_sec=None, auth_token=None):
     """
     Runs a scheduler which fills the rate limiting buckets in Redis.
 
@@ -189,7 +172,7 @@ def run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=None, auth
         logging.debug(
             f"Filling: {policy_id} every {fill_interval_s}s with {fill_quantity}. Was scheduled at {scheduled_at:.3f}, {now - scheduled_at:.3f}s late."
         )
-        redis_fill_bucket(policy_id, fill_quantity, capacity, min_revisit_time_ms)
+        repository_fill_bucket(policy_id, fill_quantity, capacity, min_revisit_time_ms, repository)
 
         # schedule next run, adjusting the time so that delay in running doesn't affect the sequence (much)
         adjusted_interval_s = max(scheduled_at + fill_interval_s - now, 0.001)
@@ -206,17 +189,21 @@ def run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=None, auth
         try:
             if auth_token is None or will_auth_token_soon_expire(auth_token):
                 auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
+                exp_time_s = extract_expiration_time(auth_token)
+                repository.save_access_token(auth_token, exp_time_s)
 
             user_id = extract_user_id(auth_token)
             stats = fetch_current_stats(auth_token, user_id)
         except Exception as ex:
             logging.warning(f"Refreshing buckets failed! {str(ex)}")
 
+        bucket_values = repository.get_buckets_state()
+
         for policy in rate_limits:
-            bucket_value = float(rds.hget(REDIS_REMAINING_KEY, policy["id"]))
+            bucket_value = float(bucket_values[policy["id"]])
             actual_value = stats[POLICY_TYPES_FULL_NAMES[policy["type"]]][policy["sampling_period"]]
             incr_by = actual_value - bucket_value
-            redis_fill_bucket(policy["id"], incr_by, policy["capacity"], min_revisit_time_ms)
+            repository_fill_bucket(policy["id"], incr_by, policy["capacity"], min_revisit_time_ms, repository)
             logging.debug(
                 f"Refreshed policy type {POLICY_TYPES_FULL_NAMES[policy['type']]} {policy['sampling_period']}. Bucket value: {bucket_value}. Actual value: {actual_value}"
             )
@@ -251,33 +238,57 @@ def run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=None, auth
     scheduler.run()
 
 
-def main():
+def main(argv):
+    if len(argv) > 1 and argv[1] == "zookeeper":
+        ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
+        zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
+        zk.start()
+
+        repository = ZooKeeperRepository(zk, key_base="/openeo/rlguard")
+    else:
+        REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+        REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+        rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+        repository = RedisRepository(rds)
+
     REFRESH_BUCKETS_SEC = os.environ.get("REFRESH_BUCKETS_SEC")
     if REFRESH_BUCKETS_SEC:
         REFRESH_BUCKETS_SEC = int(REFRESH_BUCKETS_SEC)
     else:
         REFRESH_BUCKETS_SEC = None
 
+    REVISIT_TIME_MSEC = os.environ.get("REVISIT_TIME_MSEC")
+    if REVISIT_TIME_MSEC:
+        REVISIT_TIME_MSEC = int(REVISIT_TIME_MSEC)
+    else:
+        REVISIT_TIME_MSEC = None
+
     while True:
         try:
             auth_token = request_auth_token(CLIENT_ID, CLIENT_SECRET)
         except Exception as ex:
-            logging.warning(f"Could not fetch auth token, will retry in 2s. Error: {str(ex)}")
+            logging.warning(f"Could not fetch auth token, will retry in 5s. Error: {str(ex)}")
             time.sleep(5)
             continue
 
         user_id = extract_user_id(auth_token)
         rate_limits = fetch_rate_limits(user_id, auth_token)
+        exp_time_s = extract_expiration_time(auth_token)
 
         # we need a way for workers to know if we died - we do this by setting EXPIRE on `syncer_alive`
         # key to twice the time we should refill the buckets in:
-        min_revisit_time_ms = int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
+        min_revisit_time_ms = REVISIT_TIME_MSEC or int(1000 * min([r["fill_interval_s"] for r in rate_limits])) * 2
 
-        redis_init_rate_limits(rate_limits, min_revisit_time_ms)
-        run_syncing(rate_limits, min_revisit_time_ms, refresh_buckets_sec=REFRESH_BUCKETS_SEC, auth_token=auth_token)
+        repository.init_rate_limits(rate_limits, min_revisit_time_ms)
+        repository.save_access_token(auth_token, exp_time_s)
+
+        run_syncing(
+            rate_limits, min_revisit_time_ms, repository, refresh_buckets_sec=REFRESH_BUCKETS_SEC, auth_token=auth_token
+        )
 
         logging.info("Restarting...")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv)

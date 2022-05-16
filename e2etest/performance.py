@@ -6,6 +6,7 @@ import sys
 import time
 
 import pytest
+import redis
 import requests
 
 
@@ -13,10 +14,17 @@ currentdir = os.path.dirname(os.path.realpath(__file__))
 parentdir = os.path.dirname(currentdir)
 sys.path.append(parentdir)
 from lib.rlguard import apply_for_request, SyncerDownException
+from lib.rlguard.repository import RedisRepository
 
 
 MOCKSH_ROOT_URL = "http://127.0.0.1:8000"
 SYNCER_CONTAINER_NAME = "e2etest_syncer"
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+rds = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+repository = RedisRepository(rds)
 
 
 @pytest.fixture
@@ -79,7 +87,7 @@ def worker_func(
         for t in range(max_retries):
             if use_rlguard:
                 try:
-                    delay = apply_for_request(pu_per_request)
+                    delay = apply_for_request(pu_per_request, repository)
                 except SyncerDownException:
                     if not syncer_down:
                         print("--- syncer is down! ---")
