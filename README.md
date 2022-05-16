@@ -51,7 +51,7 @@ This repository provides:
            |                                                                         |                |
            |                                           +-------------+     +---------v--------+       |
            |                                           |             |     |                  |       |
-           |                                           |    Redis    <-----+      Syncer      |       |
+           |                                           |    Store    <-----+      Syncer      |       |
            |                                           |             |     |                  |       |
 (2) request|                                           +--^-------^--+     +------------------+       |request (2)
        data|                                              |       |                                   |data
@@ -86,26 +86,37 @@ This repository provides:
 
 ## Installation
 
-Both service and library are provided as examples. We encourage you to investigate them and to adapt them to your needs.
+```
+pip install rate_limiting_guard
+```
 
 ### Syncer service
 
-The purpose of `syncer` service is to synchronize the internal state (counters which are kept in Redis) with Sentinel Hub. It does so by periodically refilling the buckets according to user's rate limiting policies.
+```python
+from rate_limiting_guard.syncer import start_syncer
+```
+
+The purpose of `syncer` service is to synchronize the internal state (counters which are kept in Redis/Zookeper) with Sentinel Hub. It does so by periodically refilling the buckets according to user's rate limiting policies.
 
 Before running the `syncer` service, first edit `.env` file and set user credentials:
 ```
 CLIENT_ID=...
 CLIENT_SECRET="..."
+REFRESH_BUCKETS_SEC=...
+ZOOKEEPER_HOSTS=...
+REDIS_HOST=...
+REDIS_PORT=...
+REVISIT_TIME_MSEC=...
+LOGLEVEL=...
 ```
 
 Note: since `CLIENT_SECRET` contains special characters by design, you should enclose it in double quotes.
 
-Syncer service depends on Redis. You can run both of them using Docker and Docker-compose:
+Syncer service depends on Redis/Zookeper. You can run both of them using Docker and Docker-compose:
 ```
 $ docker-compose build
 $ docker-compose up -d
 ```
-
 With time, the values in the buckets might drift away from the actual values on Sentinel Hub. `RLGuard` can automatically refresh the values in the buckets, just edit the `.env` file and set:
 ```
 REFRESH_BUCKETS_SEC=<refreshing interval in seconds>
@@ -113,19 +124,15 @@ REFRESH_BUCKETS_SEC=<refreshing interval in seconds>
 
 ### RLGuard library
 
-The purpose of `RLGuard` library is to make applying for a permission to make a request to Sentinel Hub a bit easier. It provides two functions:
-- `apply_for_request`: updates the counters in the central storage (Redis) and calculates the delay worker should wait for before making a request to Sentinel Hub, and
+```python
+from rate_limiting_guard.lib import calculate_processing_units, apply_for_request, RedisRepository, ZooKeeperRepository
+```
+
+The purpose of `rate_limiting_guard.lib` module is to make applying for a permission to make a request to Sentinel Hub a bit easier. It provides two functions:
+- `apply_for_request`: updates the counters in the central storage (Redis/Zookeper) and calculates the delay worker should wait for before making a request to Sentinel Hub, and
 - `calculate_processing_units`: helper function to calculate the number of [Processing Units](https://docs.sentinel-hub.com/api/latest/api/overview/processing-unit/) the request will use
 
-For the time being, the library is only available as part of this repository (i.e., it can't be installed via `pip` and similar mechanisms).
-
-To use it:
-- copy `lib/rlguard.py` file to your project,
-- import it, and
-- use `calculate_processing_units` and `apply_for_request` in your code.
-
-For an example see `lib/example.py`.
 
 ## Additional information
 
-See [DETAILS.md](./DETAILS.md) for additional implementation information.
+See [DETAILS.md](https://github.com/sentinel-hub/rate-limiting-guard/blob/master/DETAILS.md) for additional implementation information.
