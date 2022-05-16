@@ -11,8 +11,7 @@ import requests
 
 import kazoo.client
 from kazoo.client import KazooClient
-from rlguard import PolicyType
-from rlguard.repository import Repository, RedisRepository, ZooKeeperRepository
+from rate_limiting_guard.lib import PolicyType, Repository, RedisRepository, ZooKeeperRepository
 
 
 POLICY_TYPES_SHORT_NAMES = {
@@ -238,7 +237,7 @@ def run_syncing(rate_limits, min_revisit_time_ms, repository: Repository, refres
     scheduler.run()
 
 
-def main(argv):
+def start_syncer(argv):
     if len(argv) > 1 and argv[1] == "zookeeper":
         ZOOKEEPER_HOSTS = os.environ.get("ZOOKEEPER_HOSTS", "127.0.0.1:2181")
         zk = KazooClient(hosts=ZOOKEEPER_HOSTS)
@@ -291,4 +290,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    start_syncer(sys.argv)

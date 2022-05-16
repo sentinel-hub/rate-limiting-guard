@@ -7,9 +7,7 @@ import redis
 import requests
 import requests.exceptions
 
-from rlguard import calculate_processing_units, OutputFormat, apply_for_request, SyncerDownException
-from rlguard.repository import Repository, RedisRepository
-
+from rate_limiting_guard.lib import calculate_processing_units, OutputFormat, apply_for_request, SyncerDownException, Repository, RedisRepository
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 
