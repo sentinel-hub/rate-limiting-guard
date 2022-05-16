@@ -13,8 +13,7 @@ import requests
 currentdir = os.path.dirname(os.path.realpath(__file__))
 parentdir = os.path.dirname(currentdir)
 sys.path.append(parentdir)
-from lib.rlguard import apply_for_request, SyncerDownException
-from lib.rlguard.repository import RedisRepository
+from src.rate_limiting_guard.lib import apply_for_request, SyncerDownException, RedisRepository
 
 
 MOCKSH_ROOT_URL = "http://127.0.0.1:8000"

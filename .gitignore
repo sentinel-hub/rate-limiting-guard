@@ -1,2 +1,5 @@
-.env
+**/.env
 .cache
+dist
+build
+src/rate_limiting_guard.egg-info
